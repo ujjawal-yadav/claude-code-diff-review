@@ -1,0 +1,26 @@
+.root {
+  flex: 0 0 5px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  user-select: none;
+  touch-action: none;
+}
+
+/* The visible accent line — a slim 1px center stripe that brightens on
+   hover/focus to telegraph the drag target without being visually noisy. */
+.indicator {
+  position: absolute;
+  inset: 0 2px;
+  background: var(--vscode-editorWidget-border, var(--vscode-panel-border));
+  transition: background-color 80ms ease;
+}
+
+.root:hover .indicator,
+.root:focus-visible .indicator {
+  background: var(--vscode-focusBorder);
+}
+
+.root:focus-visible {
+  outline: none;
+}

@@ -1,0 +1,61 @@
+# ─── Build artifacts ──────────────────────────────────────────────────────
+dist/
+*.vsix
+*.tsbuildinfo
+
+# ─── Dependencies ─────────────────────────────────────────────────────────
+node_modules/
+
+# ─── Test / coverage ──────────────────────────────────────────────────────
+coverage/
+.vscode-test/
+.nyc_output/
+
+# ─── Generated audit / SBOM (regenerated each release) ────────────────────
+dist/sbom.cdx.json
+
+# ─── Logs ─────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── Secrets — never commit ANY of these ──────────────────────────────────
+.env
+.env.*
+!.env.example
+.claude/.credentials.json
+
+# ─── Workspace-local state for *this dev's* Claude session ────────────────
+# When developing the extension itself, your own `claude` invocations
+# write hook config and history into `.claude/`. None of that belongs
+# in the extension's repo.
+.claude/
+.claude-tracker/
+
+# ─── VS Code per-machine state ────────────────────────────────────────────
+.vscode/settings.json
+.vscode/.ropeproject/
+.history/
+
+# ─── IDE / editor noise ───────────────────────────────────────────────────
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── OS noise ─────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ─── Misc ─────────────────────────────────────────────────────────────────
+*.bak
+*.tmp

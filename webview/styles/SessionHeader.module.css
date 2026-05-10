@@ -1,0 +1,55 @@
+.root {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+  background: var(--vscode-titleBar-activeBackground, transparent);
+}
+
+.titleRow {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.title {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.meta {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+}
+
+.banner {
+  margin: 6px 0 4px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--vscode-textBlockQuote-background, rgba(127,127,127,0.08));
+  border-left: 3px solid var(--vscode-textBlockQuote-border, var(--vscode-focusBorder));
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.toggle,
+.bulk {
+  cursor: pointer;
+  padding: 4px 10px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  font-size: 12px;
+}
+
+.toggle:hover,
+.bulk:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
+}

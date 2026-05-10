@@ -1,0 +1,40 @@
+.layout {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  /* While the user is dragging the splitter, child <pre> overflows shouldn't
+     reflow text selection-style. The splitter sets touch-action: none. */
+}
+
+.sidebar {
+  /* Width is driven by `style={{ width: ... }}` from the store. Cap behaviour
+     here so the splitter feels predictable even at extremes. */
+  flex: 0 0 auto;
+  min-width: 160px;
+  max-width: 600px;
+  border-right: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+  overflow: auto;
+  background: var(--vscode-sideBar-background, transparent);
+}
+
+.content {
+  flex: 1;
+  min-width: 0; /* allow pre/code overflow to scroll instead of pushing layout */
+  overflow: auto;
+  padding: 12px 16px;
+}
+
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  color: var(--vscode-descriptionForeground);
+  text-align: center;
+}

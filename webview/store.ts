@@ -1,0 +1,236 @@
+import { create } from 'zustand';
+import type { FileReview, SessionReview, HunkStatus, SessionMetrics } from '../src/types';
+import { getPersistedState, setPersistedState } from './vscode';
+
+/**
+ * Webview store (TRD §10.3).
+ *
+ * Zustand was chosen over Redux for bundle size (~3 KB) and selector-based
+ * subscriptions: only the components that depend on a slice re-render.
+ */
+
+export type Toast = { id: number; level: 'info' | 'warn' | 'error'; message: string; ttl: number };
+
+export interface ChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ChatThread {
+  filePath: string;
+  hunkIndex: number;
+  turns: ChatTurn[];
+  /** Streaming-in-progress text appended after the last assistant turn. */
+  streaming: string | null;
+  chatId: string | null;
+  /** Last error, or null. `kind` lets the UI branch (auth → show login help). */
+  error: { kind: string; message: string } | null;
+}
+
+export interface UiState {
+  session: SessionReview | null;
+  viewType: 'split' | 'unified';
+  selectedFile: string | null;
+  selectedHunk: number | null;
+  expanded: Record<string, boolean>; // filePath → expanded
+  toasts: Toast[];
+  bannerMessage: string | null;
+
+  /** Width of the file-list sidebar in pixels. Persisted via vscode.setState. */
+  sidebarWidth: number;
+
+  /** Open chat thread (only one at a time in v1). */
+  chat: ChatThread | null;
+
+  // mutations
+  setSession(session: SessionReview, viewType: 'split' | 'unified'): void;
+  setViewType(v: 'split' | 'unified'): void;
+  applyHunk(filePath: string, hunkIndex: number, status: HunkStatus): void;
+  applyFileUpdate(filePath: string, file: FileReview): void;
+  applySessionCompleted(sessionId: string, metrics: SessionMetrics): void;
+  toggleExpanded(filePath: string): void;
+  selectFile(filePath: string): void;
+  selectHunk(hunkIndex: number): void;
+  pushToast(t: Omit<Toast, 'id'>): void;
+  dismissToast(id: number): void;
+  setBanner(msg: string | null): void;
+  setSidebarWidth(px: number): void;
+
+  // chat
+  openChat(filePath: string, hunkIndex: number): void;
+  closeChat(): void;
+  appendUserTurn(content: string, chatId: string): void;
+  appendStreamingDelta(chatId: string, text: string): void;
+  finaliseStreaming(chatId: string): void;
+  setChatError(chatId: string, error: { kind: string; message: string }): void;
+}
+
+let toastCounter = 1;
+
+const SIDEBAR_MIN = 160;
+const SIDEBAR_MAX = 600;
+const SIDEBAR_DEFAULT = 260;
+
+interface PersistedState { sidebarWidth?: number; viewType?: 'split' | 'unified' }
+const persisted = getPersistedState<PersistedState>() ?? {};
+const initialSidebarWidth = clamp(persisted.sidebarWidth ?? SIDEBAR_DEFAULT, SIDEBAR_MIN, SIDEBAR_MAX);
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+export const useUi = create<UiState>((set, get) => ({
+  session: null,
+  viewType: 'split',
+  selectedFile: null,
+  selectedHunk: null,
+  expanded: {},
+  toasts: [],
+  bannerMessage: null,
+  sidebarWidth: initialSidebarWidth,
+
+  setSession(session, viewType) {
+    const expanded: Record<string, boolean> = {};
+    // Eagerly expand only the first file (lazy mount of the rest is in the component).
+    if (session.files[0]) expanded[session.files[0].filePath] = true;
+    set({
+      session,
+      viewType,
+      selectedFile: session.files[0]?.filePath ?? null,
+      selectedHunk: session.files[0]?.hunks[0]?.index ?? null,
+      expanded,
+      bannerMessage: session.lastAssistantMessage,
+    });
+  },
+
+  setViewType(v) {
+    set({ viewType: v });
+  },
+
+  applyHunk(filePath, hunkIndex, status) {
+    const session = get().session;
+    if (!session) return;
+    const next: SessionReview = {
+      ...session,
+      files: session.files.map((f) =>
+        f.filePath !== filePath ? f : {
+          ...f,
+          hunks: f.hunks.map((h) => h.index === hunkIndex ? { ...h, status, decidedAt: Date.now() } : h),
+        },
+      ),
+    };
+    set({ session: next });
+  },
+
+  applyFileUpdate(filePath, file) {
+    const session = get().session;
+    if (!session) return;
+    set({
+      session: {
+        ...session,
+        files: session.files.map((f) => f.filePath === filePath ? file : f),
+      },
+    });
+  },
+
+  applySessionCompleted(_sessionId, _metrics) {
+    set((s) => ({ ...s, bannerMessage: 'All hunks reviewed.' }));
+  },
+
+  toggleExpanded(filePath) {
+    set((s) => ({ expanded: { ...s.expanded, [filePath]: !s.expanded[filePath] } }));
+  },
+
+  selectFile(filePath) {
+    set({ selectedFile: filePath, selectedHunk: 0 });
+  },
+
+  selectHunk(hunkIndex) {
+    set({ selectedHunk: hunkIndex });
+  },
+
+  pushToast(t) {
+    const id = toastCounter++;
+    set((s) => ({ toasts: [...s.toasts, { ...t, id }] }));
+    setTimeout(() => get().dismissToast(id), t.ttl);
+  },
+
+  dismissToast(id) {
+    set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+  },
+
+  setBanner(msg) {
+    set({ bannerMessage: msg });
+  },
+
+  setSidebarWidth(px) {
+    const w = clamp(Math.round(px), SIDEBAR_MIN, SIDEBAR_MAX);
+    set({ sidebarWidth: w });
+    // Persist asynchronously — vscode.setState is sync but we don't want
+    // it on the drag hot path more often than necessary.
+    setPersistedState({ ...(getPersistedState<PersistedState>() ?? {}), sidebarWidth: w });
+  },
+
+  // -- chat ---------------------------------------------------------------
+
+  chat: null,
+
+  openChat(filePath, hunkIndex) {
+    const current = get().chat;
+    if (current && current.filePath === filePath && current.hunkIndex === hunkIndex) {
+      return; // already open on this hunk
+    }
+    set({
+      chat: { filePath, hunkIndex, turns: [], streaming: null, chatId: null, error: null },
+    });
+  },
+
+  closeChat() {
+    set({ chat: null });
+  },
+
+  appendUserTurn(content, chatId) {
+    const chat = get().chat;
+    if (!chat) return;
+    set({
+      chat: {
+        ...chat,
+        turns: [...chat.turns, { role: 'user', content }],
+        streaming: '',
+        chatId,
+        error: null,
+      },
+    });
+  },
+
+  appendStreamingDelta(chatId, text) {
+    const chat = get().chat;
+    if (!chat || chat.chatId !== chatId) return;
+    set({ chat: { ...chat, streaming: (chat.streaming ?? '') + text } });
+  },
+
+  finaliseStreaming(chatId) {
+    const chat = get().chat;
+    if (!chat || chat.chatId !== chatId) return;
+    const text = chat.streaming ?? '';
+    if (text.length === 0) {
+      set({ chat: { ...chat, streaming: null, chatId: null } });
+      return;
+    }
+    set({
+      chat: {
+        ...chat,
+        turns: [...chat.turns, { role: 'assistant', content: text }],
+        streaming: null,
+        chatId: null,
+      },
+    });
+  },
+
+  setChatError(chatId, error) {
+    const chat = get().chat;
+    if (!chat || chat.chatId !== chatId) return;
+    // Drop any partial streaming text; surface error to user.
+    set({ chat: { ...chat, streaming: null, error } });
+  },
+}));
