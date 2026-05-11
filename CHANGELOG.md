@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: Se
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.1.0] — 2026-05-11
+
+Initial public release. Highlights:
+
+- Per-hunk Accept / Reject / Ask Claude review of every Claude Code session.
+- Claude Pro / Max OAuth auth (reads `~/.claude/.credentials.json`) **and** Anthropic API key support.
+- Streaming chat about any hunk via the Anthropic SDK, with sanitised Markdown rendering.
+- CodeLens gutter buttons, SCM panel integration, status bar pending-hunks indicator.
+- Per-file mutex on action paths; FS-failure surfacing; bulk-reject fast path.
+- Hardened webview: strict CSP with `connect-src 'none'`, ErrorBoundary, automatic JSX runtime.
+- Perf bench median 363 ms / p99 461 ms for the 50-file Stop→panel critical path (TRD budget 1500 ms).
+- 173 / 173 tests, license audit clean, CycloneDX SBOM attached.
+
 ### Added — M0 Scaffold
 - Repo skeleton, package manifest, dual esbuild config, strict TS configs, ESLint with eval/dangerouslySetInnerHTML/unsafe-exec bans, Vitest harness, GitHub Actions matrix (mac/linux/win × node20), launch + tasks JSON, smoke tests.
 

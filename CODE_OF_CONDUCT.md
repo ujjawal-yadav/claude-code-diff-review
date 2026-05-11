@@ -9,7 +9,7 @@ We follow the [Contributor Covenant v2.1](https://www.contributor-covenant.org/v
 
 ## Reporting
 
-Project maintainer contact: file a [security advisory](https://github.com/claude-code-tools/claude-code-diff-review/security/advisories/new) (yes, even for CoC matters — that's the most private channel).
+Project maintainer contact: file a [security advisory](https://github.com/ujjawal-yadav/claude-code-diff-review/security/advisories/new) (yes, even for CoC matters — that's the most private channel).
 
 All reports are confidential. Maintainers will review and respond within 7 days.
 

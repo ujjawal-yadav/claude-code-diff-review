@@ -356,7 +356,7 @@
 - Create Azure DevOps publisher account at https://marketplace.visualstudio.com/manage/createpublisher
 - Generate Marketplace PAT (all-orgs scope, Marketplace → Manage)
 - Set `VSCE_PAT` and (optionally) `OVSX_PAT` repo secrets on GitHub
-- Update `package.json` `publisher` field to the real publisher id (currently placeholder `claude-code-tools`)
+- ~~Update `package.json` `publisher` field to the real publisher id~~ ✅ done — now `UjjawalYadav`
 - Push the repo to GitHub (the prior `gh repo create` / `git push` flow)
 - Cut the first tag (`npm version 0.1.0` → `git push origin v0.1.0`) — release workflow auto-publishes
 - Pick a telemetry backend per `docs/METRICS.md` §2, wire the connection string

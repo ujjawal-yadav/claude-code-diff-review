@@ -5,7 +5,7 @@ Thanks for your interest. Quick path to a good PR:
 ## Get the dev loop running
 
 ```bash
-git clone https://github.com/claude-code-tools/claude-code-diff-review
+git clone https://github.com/ujjawal-yadav/claude-code-diff-review
 cd claude-code-diff-review
 npm ci
 npm test            # 173/173 should pass

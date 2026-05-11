@@ -12,7 +12,7 @@ These are needed only once per publisher account.
 
 1. **Sign in to Azure DevOps** at https://dev.azure.com (free account).
 2. Create a **publisher** at https://marketplace.visualstudio.com/manage/createpublisher
-   - Publisher ID becomes part of every extension URL (e.g. `claude-code-tools.claude-code-diff-review`). Pick deliberately — it's not easily renameable.
+   - Publisher ID becomes part of every extension URL (e.g. `UjjawalYadav.claude-code-diff-review`). Pick deliberately — it's not easily renameable.
    - Set the same ID in `package.json` → `"publisher"`.
 3. Generate a **Personal Access Token (PAT)** at https://dev.azure.com/<your-org>/_usersSettings/tokens
    - **Organization:** `All accessible organizations` (this is mandatory — a single-org PAT won't authenticate Marketplace publishing).
@@ -125,7 +125,7 @@ code --install-extension claude-code-diff-review-X.Y.Z.vsix
 
 Reload, then run the **A**, **B**, **D**, **H** sections of `docs/qa.md`. Don't skip this — installing a private VSIX hits a different code path than F5 debug. Real bugs hide here (missing files, native module misses, etc.).
 
-If smoke fails: `code --uninstall-extension claude-code-tools.claude-code-diff-review`, fix, restart from step 1.
+If smoke fails: `code --uninstall-extension UjjawalYadav.claude-code-diff-review`, fix, restart from step 1.
 
 ### 7. Publish to the Marketplace
 

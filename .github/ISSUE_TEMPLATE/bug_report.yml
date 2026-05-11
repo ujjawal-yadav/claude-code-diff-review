@@ -16,7 +16,7 @@ body:
     attributes:
       label: Extension version
       description: From `code --list-extensions --show-versions | findstr claude-code-diff-review`
-      placeholder: "claude-code-tools.claude-code-diff-review@0.1.0"
+      placeholder: "UjjawalYadav.claude-code-diff-review@0.1.0"
     validations:
       required: true
 

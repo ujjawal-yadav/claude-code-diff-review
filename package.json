@@ -3,7 +3,7 @@
   "displayName": "Claude Code Diff Review",
   "description": "Per-hunk review of Claude Code session changes with in-context AI chat. Pro/Max OAuth and API-key auth supported.",
   "version": "0.1.0",
-  "publisher": "claude-code-tools",
+  "publisher": "UjjawalYadav",
   "license": "MIT",
   "engines": {
     "vscode": "^1.85.0",
@@ -13,12 +13,12 @@
   "keywords": ["claude", "claude-code", "diff", "review", "ai", "anthropic"],
   "repository": {
     "type": "git",
-    "url": "https://github.com/claude-code-tools/claude-code-diff-review"
+    "url": "https://github.com/ujjawal-yadav/claude-code-diff-review.git"
   },
   "bugs": {
-    "url": "https://github.com/claude-code-tools/claude-code-diff-review/issues"
+    "url": "https://github.com/ujjawal-yadav/claude-code-diff-review/issues"
   },
-  "homepage": "https://github.com/claude-code-tools/claude-code-diff-review#readme",
+  "homepage": "https://github.com/ujjawal-yadav/claude-code-diff-review#readme",
   "qna": "marketplace",
   "pricing": "Free",
   "galleryBanner": {
