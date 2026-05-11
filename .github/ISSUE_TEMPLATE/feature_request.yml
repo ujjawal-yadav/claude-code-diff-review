@@ -1,0 +1,37 @@
+name: Feature request
+description: An idea to make the extension better.
+title: "[feature] "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem is this solving?
+      description: |
+        Describe the friction you hit. Concrete moments are best: "When I'm doing X, I want to Y, but the extension makes me Z."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would this work from a user's perspective? UI sketches welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        Did you consider workarounds with current functionality? Existing settings? A different VS Code extension?
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: This is in scope
+      description: From the PRD, the extension is **review for Claude Code edits + per-hunk control + in-context chat**. Out of scope: VCS replacement, broader code-review for non-Claude commits, model fine-tuning UI, etc.
+      options:
+        - label: I checked that this fits the extension's scope (or noted in the description why it should expand)
+          required: true

@@ -1,5 +1,10 @@
 # Claude Code Diff Review
 
+[![Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/claude-code-tools.claude-code-diff-review?label=marketplace)](https://marketplace.visualstudio.com/items?itemName=claude-code-tools.claude-code-diff-review)
+[![Marketplace Installs](https://img.shields.io/visual-studio-marketplace/i/claude-code-tools.claude-code-diff-review)](https://marketplace.visualstudio.com/items?itemName=claude-code-tools.claude-code-diff-review)
+[![Marketplace Rating](https://img.shields.io/visual-studio-marketplace/r/claude-code-tools.claude-code-diff-review)](https://marketplace.visualstudio.com/items?itemName=claude-code-tools.claude-code-diff-review&ssr=false#review-details)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 > Per-hunk review of every change Claude Code makes. Accept, reject, or ask "why?" — without leaving VS Code, and without touching git.
 
 Claude Code can autonomously edit dozens of files in a single session. This extension surfaces every change as a session-aware review panel with **per-hunk Accept / Reject / Ask Claude** controls. No git required.

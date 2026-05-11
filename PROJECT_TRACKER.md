@@ -10,12 +10,12 @@
 | Total Milestones | 9 |
 | Total Tasks | 47 |
 | Total Subtasks | 132 |
-| Completed Tasks | 38 |
-| In Progress | 0 |
-| Completion | 81% |
-| Last Updated | 2026-05-11 02:30 |
-| Active Phase | Phase 8 — GA Release (out-of-band) |
-| Active Milestone | M8 — GA |
+| Completed Tasks | 44 |
+| In Progress | 1 (M8.1.7 — user actions) |
+| Completion | 94% |
+| Last Updated | 2026-05-11 03:00 |
+| Active Phase | Phase 8 — GA Release |
+| Active Milestone | M8 — GA (code complete; awaiting user-action items) |
 | Tests Passing | 173 / 173 (17 files) |
 | Perf bench (post-optimisation) | median **363 ms** / p99 **461 ms** (was 630/814 — TRD §15 budget 1500) |
 | Perf bench (Stop→init, 50 files) | median 630 ms / p99 814 ms (budget 1500 ms) |
@@ -320,12 +320,47 @@
 
 ## 🚀 Phase 8 — GA Release (M8)
 **Goal:** Public Marketplace listing; baseline metrics captured.
-**Status:** [ ] Not Started  **Estimated Effort:** XS  **Phase Dependencies:** Phase 7
+**Status:** [~] In progress — code-side complete; user-action items remain  **Estimated Effort:** XS  **Phase Dependencies:** Phase 7
 
 ### 🏁 Milestone 8.1 — M8 GA
 
-#### ✅ Task 8.1.1 — `vsce publish`
-#### ✅ Task 8.1.2 — Metrics dashboard + monitoring rota
+#### ✅ Task 8.1.1 — Marketplace-ready manifest  **[x]**
+- `package.json` gained `qna`, `pricing: "Free"`, `galleryBanner` (dark, `#1F2937`).
+
+#### ✅ Task 8.1.2 — Publishing runbook (`docs/RELEASE.md`)  **[x]**
+- 12-step per-release sequence + prerequisite setup for Marketplace + Open VSX.
+- Hotfix path; yank/unpublish; common publish failures table; post-launch monitoring checklist (Day 0/1/3/7/14).
+
+#### ✅ Task 8.1.3 — Automated release workflow (`.github/workflows/release.yml`)  **[x]**
+- Triggered by version tag push. Verifies tag↔package.json version match, runs `release:check`, builds VSIX + SBOM, publishes to Marketplace (`VSCE_PAT` secret) + Open VSX (`OVSX_PAT` secret, optional), and creates a GitHub Release with VSIX + SBOM attached. Pre-release detection from tag suffix.
+
+#### ✅ Task 8.1.4 — GitHub repo hygiene  **[x]**
+- `.github/ISSUE_TEMPLATE/bug_report.yml` — structured bug report form (version, OS, auth method, repro steps, output channel paste).
+- `.github/ISSUE_TEMPLATE/feature_request.yml` — scope check + alternatives.
+- `.github/ISSUE_TEMPLATE/config.yml` — routes questions to Discussions, security to private advisories.
+- `.github/PULL_REQUEST_TEMPLATE.md` — type, manual verification, checklist.
+- `CONTRIBUTING.md` — dev loop, project tour, coding rules, what to avoid.
+- `CODE_OF_CONDUCT.md` — Contributor Covenant v2.1.
+
+#### ✅ Task 8.1.5 — Metrics dashboard guide (`docs/METRICS.md`)  **[x]**
+- Event catalogue (what's emitted, post-scrub property shape).
+- Three backend options (Application Insights / own endpoint / PostHog) with trade-offs and recommendation.
+- KQL/SQL sketches for all six PRD §3.2 KPIs.
+- Dashboard layout sketch.
+- Pre-GA checklist (latencyMs on review.opened, chat.completed emission).
+
+#### ⏭️ Task 8.1.6 — Marketplace badges in README  **[x]**
+- Four shields.io badges at the top (version, installs, rating, license). Resolve once the listing is live.
+
+#### ⏳ Task 8.1.7 — User-action items (not codeable from here)
+- Create Azure DevOps publisher account at https://marketplace.visualstudio.com/manage/createpublisher
+- Generate Marketplace PAT (all-orgs scope, Marketplace → Manage)
+- Set `VSCE_PAT` and (optionally) `OVSX_PAT` repo secrets on GitHub
+- Update `package.json` `publisher` field to the real publisher id (currently placeholder `claude-code-tools`)
+- Push the repo to GitHub (the prior `gh repo create` / `git push` flow)
+- Cut the first tag (`npm version 0.1.0` → `git push origin v0.1.0`) — release workflow auto-publishes
+- Pick a telemetry backend per `docs/METRICS.md` §2, wire the connection string
+- (Pre-1.0 polish) Design a 128×128 PNG icon; add `"icon": "icon.png"` to manifest
 
 ---
 

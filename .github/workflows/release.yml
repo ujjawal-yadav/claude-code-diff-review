@@ -1,0 +1,98 @@
+name: Release
+
+# Triggered by pushing a version tag (e.g. `v0.2.0`). Builds, audits,
+# packages, publishes to the Marketplace + Open VSX, and creates a GitHub
+# Release with the VSIX and SBOM attached. Manually triggerable via the
+# workflow_dispatch input for emergency re-runs.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'   # pre-releases: v1.0.0-beta.1
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (must already exist)'
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create GitHub Releases
+    timeout-minutes: 15
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Verify tag matches package.json version
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${TAG#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $TAG does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Release-check gates (typecheck + lint + test + audit + build)
+        run: npm run release:check
+
+      - name: Generate SBOM
+        run: npm run audit:sbom
+
+      - name: Package VSIX
+        run: npx vsce package --out claude-code-diff-review-${TAG#v}.vsix
+
+      - name: Publish to VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx vsce publish --packagePath claude-code-diff-review-${TAG#v}.vsix
+
+      - name: Publish to Open VSX
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        if: ${{ env.OVSX_PAT != '' }}
+        run: npx ovsx publish claude-code-diff-review-${TAG#v}.vsix --pat "$OVSX_PAT"
+
+      - name: Extract changelog notes for this version
+        id: changelog
+        run: |
+          VERSION="${TAG#v}"
+          # Pull the section between `## [VERSION]` and the next `## [` (or EOF)
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { capture=1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No changelog section found for version $VERSION" > release-notes.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.TAG }}
+          tag_name: ${{ env.TAG }}
+          body_path: release-notes.md
+          files: |
+            claude-code-diff-review-*.vsix
+            dist/sbom.cdx.json
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: ${{ contains(env.TAG, '-') }}

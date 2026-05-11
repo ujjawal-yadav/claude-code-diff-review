@@ -1,0 +1,10 @@
+Required repository secrets for `release.yml`:
+
+| Secret | What | Where to set |
+|---|---|---|
+| `VSCE_PAT` | Azure DevOps PAT with **Marketplace → Manage** scope, **All accessible organizations** | GitHub repo → Settings → Secrets and variables → Actions → New repository secret |
+| `OVSX_PAT` | Open VSX access token (optional — if absent, the Open VSX publish step is skipped) | Same place |
+
+Without `VSCE_PAT` the release job fails at the publish step. The earlier build / audit / package / GitHub Release steps still succeed and you can manually re-run `vsce publish` from a workstation if needed.
+
+Delete this `.note` file when secrets are configured — it's a checklist, not workflow code.

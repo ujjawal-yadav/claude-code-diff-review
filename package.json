@@ -19,6 +19,12 @@
     "url": "https://github.com/claude-code-tools/claude-code-diff-review/issues"
   },
   "homepage": "https://github.com/claude-code-tools/claude-code-diff-review#readme",
+  "qna": "marketplace",
+  "pricing": "Free",
+  "galleryBanner": {
+    "color": "#1F2937",
+    "theme": "dark"
+  },
   "main": "./dist/extension.js",
   "activationEvents": ["onStartupFinished"],
   "contributes": {

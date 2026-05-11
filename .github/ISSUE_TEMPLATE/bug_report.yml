@@ -1,0 +1,115 @@
+name: Bug report
+description: Something broke. Help us reproduce and fix it.
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report. Before submitting, please:
+        1. Search existing issues to avoid duplicates.
+        2. Try the **Troubleshooting** section in the README — many issues are environmental.
+        3. Grab the **Claude Review** Output channel content — most reports need it.
+
+  - type: input
+    id: extension-version
+    attributes:
+      label: Extension version
+      description: From `code --list-extensions --show-versions | findstr claude-code-diff-review`
+      placeholder: "claude-code-tools.claude-code-diff-review@0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: vscode-version
+    attributes:
+      label: VS Code version
+      description: From Help → About
+      placeholder: "1.94.2"
+    validations:
+      required: true
+
+  - type: input
+    id: claude-code-version
+    attributes:
+      label: Claude Code version
+      description: From `claude --version`
+      placeholder: "2.1.138"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: auth-method
+    attributes:
+      label: Authentication method
+      description: From "Claude Review: Use Claude Code Auth"
+      options:
+        - Claude Pro/Max OAuth (claude-code-file)
+        - Claude Pro/Max OAuth (env var)
+        - Claude Pro/Max OAuth (manually pasted)
+        - Anthropic API key
+        - No credential configured
+        - Unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal repro. Imagine someone trying this on a fresh install — what do they do, in order?
+      placeholder: |
+        1. Open VS Code on a TypeScript project
+        2. Run `claude` in the terminal
+        3. Ask Claude to "rename function foo to bar"
+        4. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Screenshots / screen recordings are very welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: output-channel
+    attributes:
+      label: Claude Review Output channel
+      description: |
+        Open the Output panel (Ctrl+Shift+U) and select "Claude Code Review" from the dropdown.
+        Paste the relevant lines. **Redact anything that looks like a path or secret you'd rather not share.**
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submit checklist
+      options:
+        - label: I searched existing issues
+          required: true
+        - label: I redacted any file paths or content I don't want public
+          required: true

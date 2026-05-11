@@ -29,6 +29,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: Se
 - `ClaudeReviewScmProvider` — file-level resource groups (Pending / Partial / Rejected / Accepted) with strikethrough/faded decorations.
 - 14 new orchestrator tests (path-resolution-agnostic; works on win/linux/mac).
 
+### Added — M8 GA Release readiness
+- `package.json` marketplace polish: `qna: "marketplace"`, `pricing: "Free"`, `galleryBanner` (dark, `#1F2937`).
+- `docs/RELEASE.md` — 12-step per-release runbook with hotfix path, yank procedure, common-failure table, and Day 0/1/3/7/14 post-launch monitoring checklist.
+- `.github/workflows/release.yml` — tag-triggered CI release: tag↔version verification, full `release:check` gate, SBOM regeneration, VSIX packaging, parallel publish to VS Code Marketplace (`VSCE_PAT`) and Open VSX (`OVSX_PAT`, optional), GitHub Release creation with VSIX + SBOM attached. Pre-release detection from tag suffix.
+- GitHub repo hygiene: structured bug-report and feature-request issue templates (auth method, OS, version, output-channel paste), PR template with verification checklist, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant v2.1).
+- `docs/METRICS.md` — telemetry event catalogue, three backend trade-offs (Application Insights / own endpoint / PostHog), KQL queries for all six PRD §3.2 KPIs, dashboard layout sketch, pre-GA emission checklist.
+- README marketplace badges (version / installs / rating / license).
+
 ### Added — M7 Beta Release packaging
 - VSIX builds at **3.28 MB** via `npm run package` (`vsce package`). All required manifest fields populated (`repository`, `bugs`, `homepage`).
 - `src/onboarding.ts` — first-activation notification with four actions (Set OAuth / Set API key / Use claude /login / Dismiss). Skips silently if a credential resolves on first probe; persists "seen" in `globalState`.
