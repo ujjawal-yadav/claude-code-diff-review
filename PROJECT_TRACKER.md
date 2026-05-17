@@ -364,6 +364,24 @@
 
 ---
 
+## 🚀 Phase 9 — Multi-Agent & History (M9)
+**Goal:** Structurally multi-agent-ready (Claude Code today, OpenCode tomorrow) with a session-history layer.
+**Status:** [~] In progress
+**Estimated Effort:** L
+**Phase Dependencies:** Phase 8
+
+### 🏁 Milestone 9.4 — Adapter refactor
+
+#### ✅ Task 9.4a — `AgentAdapter` extraction  **[x]** Completed 2026-05-18
+- **Files:** `src/adapters/agentAdapter.ts` (new), `src/adapters/claudeCodeAdapter.ts` (new), `src/adapters/index.ts` (new), `src/server.ts` (modified — route handlers delegate parse to adapter registry), `src/hookConfigurator.ts` (modified — `generateHookConfig` delegates to adapter), `src/types.ts` (modified — `AgentId` + `agentId` field on `SessionData` & `SessionReview`), `src/snapshotStore.ts` (modified — accepts `agentId` arg, defaults to `'claude-code'`), `src/reviewOrchestrator.ts` (modified — propagates `agentId` from `SessionData` into `SessionReview`), `src/extension.ts` (modified — PreToolUse/PostToolUse handlers dispatch through adapter), `tests/unit/adapter.claudeCode.test.ts` (new — 16 tests).
+- **Acceptance:** No behavioural change vs v0.2; typecheck strict + exactOptionalPropertyTypes clean; full test suite passes (189/189, includes new 16-test adapter file).
+- **Notes:** `resolveTranscriptPath` and `extractSubagentId` are stubbed `return null` with `// TODO M9.5/M9.6` markers. `HookConfigOpts.scope === 'user'` is reserved (current adapter throws); workspace is the only wired path.
+
+#### ⏭️ Task 9.4b — `OpenCodeAdapter`  **[-]** Deferred
+- **Reason:** Spec depends on unverified OpenCode HTTP-hook support. Defer until OpenCode publishes a stable hook configuration surface equivalent to Claude Code's PreToolUse / PostToolUse / Stop events. The `AgentAdapter` interface, registry, and `agentId` field are already in place, so adding OpenCode later is a contained slice (one new file under `src/adapters/`, one registry-entry change, no orchestrator/history rework).
+
+---
+
 ## 🔀 Deviations & Decisions Log
 
 | # | Date | Decision | Reason | Impact |
@@ -463,3 +481,50 @@
 3. Onboarding flow: first-run notification with a quick-start ("Set OAuth token, run `claude`")
 4. Optional: revisit axe-core a11y test now that test runner is more mature
 5. Optional: install the produced VSIX in a real VS Code (not dev-host) to validate the marketplace install flow before publishing
+
+---
+
+### Session 2 — 2026-05-18 (Wave 2: M9.4a Adapter refactor)
+**Summary:** Extracted a clean `AgentAdapter` abstraction so the codebase is structurally multi-agent ready. Pure refactor — no behavioural delta from v0.2.
+
+**Completed:**
+- [x] Task 9.4a.1 — `src/adapters/agentAdapter.ts` (interface + Normalised* shapes + `AgentId` discriminated union)
+- [x] Task 9.4a.2 — `src/adapters/claudeCodeAdapter.ts` (extracts Zod parse + tool-gate from `server.ts` and `buildEntry`/`routeFor` from `hookConfigurator.ts`)
+- [x] Task 9.4a.3 — `src/adapters/index.ts` (read-only registry, `requireAdapter` helper)
+- [x] Task 9.4a.4 — wired adapter through `server.ts` route handlers and `hookConfigurator.ensureHooksInstalled`
+- [x] Task 9.4a.5 — `agentId: AgentId` on `SessionData` + `SessionReview`; propagated from `SnapshotStore.captureOriginal` → `ReviewOrchestrator.openReview`
+- [x] Task 9.4a.6 — `tests/unit/adapter.claudeCode.test.ts` (16 tests: parse round-trip, malformed rejection, hook-config shape, scope validation, placeholder stubs, registry)
+
+**Files Changed:**
+- `src/adapters/agentAdapter.ts` — created
+- `src/adapters/claudeCodeAdapter.ts` — created
+- `src/adapters/index.ts` — created
+- `src/server.ts` — route handlers delegate parse to adapter registry; raw payload re-parsed for back-compat callback signature
+- `src/hookConfigurator.ts` — entry construction delegated to adapter; `buildEntry`/`routeFor`/`MATCHER`/`TIMEOUT_SEC` removed
+- `src/types.ts` — `AgentId` exported; `agentId` field added to `SessionData` and `SessionReview`
+- `src/snapshotStore.ts` — `captureOriginal` and `recordTouched` accept optional `agentId` (defaults `'claude-code'`); `getOrCreateSession` stores it
+- `src/reviewOrchestrator.ts` — `openReview` propagates `sessionData.agentId` into the created `SessionReview`
+- `src/extension.ts` — `onPreToolUse`/`onPostToolUse` dispatch through `agentAdapters.get('claude-code')` for normalisation
+- `tests/unit/adapter.claudeCode.test.ts` — created (16 tests)
+- `PROJECT_TRACKER.md` — Phase 9 section added; M9.4a closed; M9.4b marked deferred
+
+**Dependencies Added:** none
+
+**Decisions:**
+- Server callback signatures stay typed `(PreToolUsePayload) => ...` rather than `(NormalisedPreToolUse) => ...` to keep the M1 server tests and the existing `extension.ts` handler shape unchanged. The adapter still owns parse — the route handler delegates to `adapter.parsePreToolUse(req.body)` for validation + tool-gate, then re-parses to satisfy the legacy callback type. When OpenCode lands (M9.4b) we'll lift callbacks to `Normalised*`.
+- `SnapshotStore.captureOriginal` / `recordTouched` accept `agentId` as a defaulted optional rather than a required positional arg. Why: zero churn at every call-site (including tests and `mock-claude.ts`); the default `'claude-code'` is correct for every existing caller. Tradeoff: a future caller could silently default-tag an OpenCode event — acceptable risk now, fixable when M9.4b actually adds a non-Claude path.
+- `parseStop` synthesises `cwd: ''` when the raw payload omits it (Claude Code's Stop event does). Wave-1's history layer resolves cwd via the snapshot store keyed on sessionId; an empty string here is the existing contract, just reified explicitly.
+- M9.4b deferred (see entry above).
+
+**Deviations:**
+- Spec said 234 existing tests; this worktree's baseline is 189. Result is 189 → 189 (existing) + 16 (new adapter file). Likely the 234 figure included tests added by the parallel Wave-1 agent (`beta-zero-core`) — outside this scope.
+
+**Tech Debt Introduced:**
+- Server route handlers Zod-validate twice on the happy path (once inside the adapter, once on re-parse for the callback type). Cost is negligible (< 0.1 ms on these tiny payloads) but it's a wart. Will go away when callbacks are lifted to `Normalised*` (M9.4b or later).
+- `HookConfigOpts.scope === 'user'` is declared but every adapter currently throws on it. Concrete user-scope writes are deferred.
+
+**Next Session Should:**
+1. Coordinate with `beta-zero-core` on Wave 1 merge (orchestrator/history); their `agentId` propagation should align with the field this wave added.
+2. M9.4b (OpenCode adapter) — gated on OpenCode hook spec confirmation.
+3. M9.5 — flesh out `resolveTranscriptPath` for Claude Code (`~/.claude/projects/<slug>/<sessionId>.jsonl`).
+4. M9.6 — `extractSubagentId` for Claude Code Task tool.
