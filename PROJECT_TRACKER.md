@@ -6,16 +6,17 @@
 ## 📊 Stats
 | Metric | Value |
 |---|---|
-| Total Phases | 9 |
-| Total Milestones | 9 |
-| Total Tasks | 47 |
-| Total Subtasks | 132 |
-| Completed Tasks | 44 |
-| In Progress | 1 (M8.1.7 — user actions) |
-| Completion | 94% |
-| Last Updated | 2026-05-11 03:00 |
-| Active Phase | Phase 8 — GA Release |
-| Active Milestone | M8 — GA (code complete; awaiting user-action items) |
+| Total Phases | 11 |
+| Total Milestones | 17 |
+| Total Tasks | 112 |
+| Total Subtasks | 142 |
+| Completed Tasks | 70 |
+| In Progress | 1 (M10.1 β.0 Actionable History — sub-task 10.1.0 complete) |
+| Completion | 68% |
+| Last Updated | 2026-05-18 02:50 |
+| Active Phase | Phase 10 — Phase β.0: Actionable History |
+| Active Milestone | M10.1 β.0 Bridge — 10.1.0 complete; next: 10.1.1 pure types |
+| Tests Passing | 237 / 237 (25 files) |
 | Tests Passing | 173 / 173 (17 files) |
 | Perf bench (post-optimisation) | median **363 ms** / p99 **461 ms** (was 630/814 — TRD §15 budget 1500) |
 | Perf bench (Stop→init, 50 files) | median 630 ms / p99 814 ms (budget 1500 ms) |
@@ -364,6 +365,673 @@
 
 ---
 
+## 🚀 Phase 9 — Phase α: Substrate + Defensive Moat
+**Goal:** Implement the Memory Design event-log substrate, switch hook install to user-level by default, add OpenCode adapter (multi-agent positioning), make chat transcript-aware, surface sub-agent attribution, and refactor accept/reject onto a drift-free set-based foundation that all Phase β surfaces depend on.
+**Status:** [~] In Progress
+**Estimated Effort:** XL
+**Phase Dependencies:** Phase 8 (M8.1.7 user-action items can finish in parallel)
+**Plan Source:** `~/.claude/plans/phase-alpha-immediate-md-new-cosmic-pearl.md`
+**Spec Source:** `docs/PHASE-ALPHA-IMMEDIATE.md`
+
+---
+
+### 🏁 Milestone 9.1 — Set-Based Reversibility Foundation (Track 6)
+**Status:** [x] Complete
+**Complexity:** L
+**Acceptance Criteria:** All T6-* acceptance tests green per spec §10; existing 173 tests remain green; `renderFileFromHunkSet(acceptedSet=all)` equals current Claude content; 50-toggle round-trip byte-for-byte identical; coupled-hunk rejection surfaces `set-conflict` banner; format-on-save drift tolerated via fuzz.
+**Depends On:** none
+**Completed At:** 2026-05-11 05:15 (186/186 tests passing, all T6-* green)
+
+#### ✅ Task 9.1.1 — `HunkSetState` / `RenderResult` types
+- **Status:** [x]
+- **Complexity:** XS
+- **Depends On:** none
+- **Acceptance Criteria:** Types compile under strict TS; `RenderResult` is a discriminated union (`ok` / `set-conflict` / `snapshot-binary`); exported from `src/types.ts`.
+- **Files:** `src/types.ts`
+- **Notes:** No barrel exists; types are imported directly from `./types.js` throughout. Doc comment in types.ts explains why `acceptedSet` is host-side only (Set structured-clone limit). Existing `RevertResult` (used by legacy `revertHunk`) preserved alongside new `RenderResult` — distinct types with distinct purposes.
+- **Completed At:** 2026-05-11 04:15
+
+  - [x] Subtask: Add `HunkSetState { filePath, originalSnapshot, allHunks, acceptedSet }` interface
+  - [x] Subtask: Add `RenderResult` discriminated union with three variants
+  - [x] Subtask: Re-export from existing barrel if present — N/A, no barrel
+
+#### ✅ Task 9.1.2 — `renderFileFromHunkSet` implementation
+- **Status:** [x]
+- **Complexity:** M
+- **Depends On:** Task 9.1.1
+- **Acceptance Criteria:** Pure function (no I/O); applies hunks in increasing `oldStart` order; uses `Diff.applyPatch` with `fuzzFactor: 2`; returns `set-conflict` with `conflictingHunks: number[]` on failure; binary snapshots return `snapshot-binary`.
+- **Files:** `src/core/hunkSet.ts`
+- **Notes:** Reuses fuzz factor strategy from `src/diffEngine.ts:68` `revertHunk`. Strict-first then fuzz retry, matching the existing legacy `revertHunk` two-pass. Multi-hunk patch built as a single jsdiff `ParsedDiff` rather than sequential applyPatch — jsdiff handles cumulative offset for free. On failure, single-hunk-on-snapshot probes identify offending hunks; pure interaction conflicts fall back to the last sorted index. Also exports `initialHunkSetState(filePath, snapshot, hunks)` helper for the M9.1.5 migration entry point. EOL handling matches `revertHunk` (snapshot used as-is; fuzz tolerates CRLF/LF context mismatch).
+- **Completed At:** 2026-05-11 04:30
+
+  - [x] Subtask: Sort `acceptedSet` by `allHunks[i].oldStart` ascending
+  - [x] Subtask: Multi-hunk `applyPatch` (strict → fuzz); per-hunk probes on failure
+  - [x] Subtask: Return `set-conflict` with all failing indices on failure
+  - [x] Subtask: NUL-byte detection for `snapshot-binary` path
+
+#### ✅ Task 9.1.3 — Turn-aware SnapshotStore
+- **Status:** [x]
+- **Complexity:** S
+- **Depends On:** Task 9.1.1
+- **Acceptance Criteria:** `SessionData.currentTurnId: string | null`, `turnStartedAt: number | null` populated. `beginTurnIfNeeded(sid)` mints turnId on first PreToolUse after a `Stop` (idempotent across concurrent calls).
+- **Files:** `src/types.ts`, `src/snapshotStore.ts`
+- **Notes:** Used Node's built-in `crypto.randomUUID()` (Node ≥14.17) — no extra dependency. Added `endTurn(sessionId)` companion to be called from orchestrator's Stop handler; idempotent. Existing 18/18 snapshotStore tests remain green. Concurrency: first-writer-wins via `setIfAbsent` on `currentTurnId` field.
+- **Completed At:** 2026-05-11 04:40
+
+  - [x] Subtask: Add fields to `SessionData` in `src/types.ts`
+  - [x] Subtask: Add `beginTurnIfNeeded(sid, cwd): string` to `SnapshotStore`
+  - [x] Subtask: `endTurn(sid)` to be called on Stop boundary (wired in M9.1.4)
+  - [x] Subtask: Concurrency-safe via `setIfAbsent` on the field
+
+#### ✅ Task 9.1.4 — Orchestrator refactor to set-based pipeline
+- **Status:** [x]
+- **Complexity:** L
+- **Depends On:** Task 9.1.2, Task 9.1.3
+- **Acceptance Criteria:** `ReviewOrchestrator.handleHunkAction()` loads `HunkSetState` from in-memory store, mutates `acceptedSet`, calls `renderFileFromHunkSet`, writes through existing per-file mutex. On `set-conflict`: revert set change, surface panel banner with conflicting hunk indices + "Re-accept coupled hunks" action.
+- **Files:** `src/reviewOrchestrator.ts`, `src/messages.ts`, `src/reviewPanel.ts`, plus 6 test stub files
+- **Notes:** Introduced `applyHunkSetChange(sid, file, mutate)` as the single write primitive — both `handleHunkAction`, `handleBulk`, and `revertFileToSnapshot` route through it. Set is rolled back on render/write failure to keep disk and state consistent. Added no-op short-circuit via `setsEqual` so accepting an already-accepted hunk skips render+write (preserves v0.1.0 invariant that accept-on-applied is free). PanelGateway gained `postSetConflict` — cascaded to 6 test stub classes. Removed dead code: `applyReject` private method and `revertHunk` import (the legacy single-hunk reverse-patch is no longer in the hot path). `revertFileToSnapshot` simplified — no double-write fallback; on FS failure, hunks stay pending and the warning surfaces. All 173 existing tests green.
+- **Completed At:** 2026-05-11 04:55
+
+  - [x] Subtask: Replace accept/reject body with set membership update + render via `applyHunkSetChange`
+  - [x] Subtask: Add `set-conflict-warning` to `HostToWebview` message union in `src/messages.ts`
+  - [x] Subtask: Wire `postSetConflict` through `ReviewPanelManager` to webview
+  - [x] Subtask: Bulk-accept / bulk-reject use single set update + single render + single write (the legacy fast-path is now the only path, by construction)
+  - [x] Subtask: Wire `SnapshotStore.endTurn(sid)` into Stop handler so PreToolUse mints fresh turnIds
+  - [x] Subtask: `revertFileToSnapshot` routes through empty-set render
+
+#### ✅ Task 9.1.5 — Initial-state migration
+- **Status:** [x]
+- **Complexity:** XS
+- **Depends On:** Task 9.1.4
+- **Acceptance Criteria:** On first review of a session, `acceptedSet = new Set(allHunks.map((_, i) => i))`. Rendering produces current disk content byte-for-byte. No user-visible behaviour change vs v0.1.0.
+- **Files:** `src/reviewOrchestrator.ts`, `src/core/hunkSet.ts`
+- **Notes:** Landed as part of M9.1.4: `openReview` calls `indexHunkSets(sid, files, sessionData.originals)` which uses `initialHunkSetState` from `hunkSet.ts` — that helper seeds `acceptedSet = {0..N-1}`. Verified by the all-tests-still-green run after M9.1.4: every existing test that exercises post-Stop state implicitly asserts the initial render matches current disk.
+- **Completed At:** 2026-05-11 04:55
+
+  - [x] Subtask: Initialise `HunkSetState.acceptedSet` on session open (via `initialHunkSetState`)
+  - [x] Subtask: Byte-equality with current disk verified by existing 173-test suite continuing to pass
+
+#### ✅ Task 9.1.6 — Acceptance tests T6-1 through T6-5
+- **Status:** [x]
+- **Complexity:** M
+- **Depends On:** Task 9.1.4, Task 9.1.5
+- **Acceptance Criteria:** All five test IDs from spec §8.7 pass.
+- **Files:** `tests/unit/hunkSet.test.ts` (9 unit tests), `tests/integration/orchestrator.set.test.ts` (4 integration tests)
+- **Notes:** T6-3 needed calibration — jsdiff's `fuzzFactor:2` is more permissive than spec implied; the conflict-trigger fixture had to use 4 mismatched context lines (exceeding fuzz tolerance) rather than out-of-bounds line numbers. T6-5 fixture uses 2000 lines / changes every 20 lines (~100 hunks) to ensure jsdiff doesn't merge them. Integration tests caught a Windows path-resolution subtlety: must use the `AbsPath` returned by `captureOriginal`, not a hardcoded POSIX string, because `path.resolve` is platform-native. Full test count rose 173 → 186.
+- **Completed At:** 2026-05-11 05:15
+
+  - [x] Subtask: T6-1 toggle Accept→Reject→Accept round-trip identity
+  - [x] Subtask: T6-2 50× byte-for-byte identical
+  - [x] Subtask: T6-3 mismatched-context hunk → `set-conflict` with offending index
+  - [x] Subtask: T6-4 leading-blank-line drift → fuzz applies → correct
+  - [x] Subtask: T6-5 perf: ~100-hunk set change <200 ms P99 on 2000-line fixture
+  - [x] Subtask: Binary-snapshot guard returns `snapshot-binary`
+  - [x] Subtask: Empty-set short-circuit returns original snapshot without invoking jsdiff
+  - [x] Subtask: Integration: initial state after Stop = current disk byte-for-byte
+  - [x] Subtask: Integration: reject single hunk → single FS write with hunk reverted
+  - [x] Subtask: Integration: bulk reject-all → single FS write of snapshot
+  - [x] Subtask: Integration: accept on already-applied hunk → no FS write (short-circuit)
+
+---
+
+### 🏁 Milestone 9.2 — Memory Design Substrate (Track 1)
+**Status:** [x] Complete
+**Complexity:** XL
+**Acceptance Criteria:** All T1-A* acceptance tests per spec §3.5 green; History panel renders sessions→turns→files tree; per-hunk undo restores via mutex; retention sweeper removes expired blobs/segments; crash recovery surfaces "Resume review" toast within 5 s of activation.
+**Depends On:** M9.1 (set-based render must succeed before event recorded)
+**Completed At:** 2026-05-12 00:10 (229/229 tests, dual webview bundles ship)
+
+#### ✅ Task 9.2.1 — `historyEvents.ts` schema
+- **Status:** [x]
+- **Complexity:** S
+- **Files:** `src/history/historyEvents.ts`
+- **Completed At:** 2026-05-11 05:40
+
+  - [x] Subtask: All 6 event types defined + Zod discriminated-union validators
+  - [x] Subtask: Tolerant `decodeEvent` helper (returns null on schema/garbage)
+  - [x] Subtask: `EVENT_SCHEMA_VERSION = 1` constant
+
+#### ✅ Task 9.2.2 — `BlobStore` (content-addressed)
+- **Status:** [x]
+- **Complexity:** M
+- **Files:** `src/history/historyBlobs.ts`, `tests/unit/historyBlobs.test.ts` (7 tests)
+- **Completed At:** 2026-05-11 05:42
+
+  - [x] Subtask: `write(content): sha256_hex` with idempotent skip-on-exist
+  - [x] Subtask: Two-level shard (`blobs/<sha[:2]>/<sha>.txt`)
+  - [x] Subtask: Atomic write via tmp + rename
+  - [x] Subtask: `has`, `delete`, `list` (async generator)
+
+#### ✅ Task 9.2.3 — `historyWriter.ts` JSONL append + rollover
+- **Status:** [x]
+- **Complexity:** M
+- **Files:** `src/history/historyWriter.ts`
+- **Notes:** Uses Node `fs.appendFile` which lands under 1 ms locally on SSDs — buffered-flush from spec is deferred until perf bench flags a regression. `HistoryEventInput` distributive `Omit<E, 'eventId'|'v'>` preserves discriminated-union narrowing at call sites.
+- **Completed At:** 2026-05-11 05:44
+
+  - [x] Subtask: Per-session monotonic event id
+  - [x] Subtask: 5 MB segment rollover (`<sid>.0.jsonl`, `<sid>.1.jsonl`, ...)
+  - [x] Subtask: Lazy state probe scans existing segments to continue where left off
+
+#### ✅ Task 9.2.4 — `historyReader.ts` streaming + tolerant decode
+- **Status:** [x]
+- **Complexity:** M
+- **Files:** `src/history/historyReader.ts`
+- **Completed At:** 2026-05-11 05:45
+
+  - [x] Subtask: `readSession(sid)` async generator (line-by-line via readline)
+  - [x] Subtask: Skip malformed lines silently; never throw
+  - [x] Subtask: `findResumeCandidates({ withinMs })` — open-turn detection
+
+#### ✅ Task 9.2.5 — `historyIndex.ts` index.json maintenance
+- **Status:** [x]
+- **Complexity:** S
+- **Files:** `src/history/historyIndex.ts`
+- **Completed At:** 2026-05-11 05:46
+
+  - [x] Subtask: Schema with `SessionIndexEntry[]`
+  - [x] Subtask: Atomic write (tmp + rename); in-memory cache for hot reads
+
+#### ✅ Task 9.2.6 — `historyService.ts` orchestrator
+- **Status:** [x]
+- **Complexity:** L
+- **Files:** `src/history/historyService.ts`
+- **Notes:** All record* methods are best-effort (errors logged but never propagated to user flow). `resolveHistoryRoot` exposes the Q6 path scheme (user-scope: `~/.claude/review-history/<sha256(workspace)[:16]>/`; workspace-scope: `<workspace>/.claude/review-history/`). `sweep(retentionDays)` removes expired sessions + their unreferenced blobs by scanning live sessions' refs first.
+- **Completed At:** 2026-05-11 05:48
+
+  - [x] Subtask: Path resolver `resolveHistoryRoot` exported + tested
+  - [x] Subtask: `recordTurnStarted/Stopped/HunkDecided/FileSnapshotReverted/TurnAborted`
+  - [x] Subtask: `findResumeCandidates`, `readEvents`, `readBlob`, `listSessions`
+  - [x] Subtask: `sweep` reference-scanning retention sweeper
+
+#### ✅ Task 9.2.7 — Wire history into orchestrator + extension
+- **Status:** [x]
+- **Complexity:** M
+- **Depends On:** Task 9.1.4, Task 9.2.6
+- **Files:** `src/extension.ts`, `src/reviewOrchestrator.ts`, `src/snapshotStore.ts`
+- **Notes:** `beginTurnIfNeeded` now returns `{ turnId, freshlyMinted }` so extension.ts can fire `recordTurnStarted` on first PreToolUse of a new turn. Orchestrator gains optional `history`/`agentId` opts — tests don't pass these so the wiring is fully optional. Three private record* helpers route every decision through history when configured.
+- **Completed At:** 2026-05-11 05:50
+
+  - [x] Subtask: Activation constructs `historyService` (workspace folder required)
+  - [x] Subtask: `onPreToolUse` calls `beginTurnIfNeeded` + lazily records `turn-started`
+  - [x] Subtask: `handleHunkAction` records `hunk-decided` post-write
+  - [x] Subtask: `handleBulk` records each hunk decision in the batch
+  - [x] Subtask: `revertFileToSnapshot` records `file-snapshot-reverted`
+  - [x] Subtask: `openReview` records `turn-stopped` with full diff payload
+
+#### ✅ Task 9.2.8 — Webview reorg + History panel webview
+- **Status:** [x]
+- **Complexity:** L
+- **Files:** `webview/history/index.tsx`, `webview/history/App.tsx`, `webview/history/vscode.ts`, `webview/history/components/{SessionList,SessionDetail}.tsx`, `src/historyPanel.ts`, `src/messages.ts` (HistoryWebviewToHost / HistoryHostToWebview protocol), `src/history/historyTypes.ts` (extracted pure types for webview safety), `esbuild.config.mjs` (second bundle target), `package.json` (new `openHistory` command)
+- **Notes:** Skipped the literal `webview/* → webview/review/*` rename — pure addition (new `webview/history/`) was lower risk and achieved the same outcome (room for the new bundle alongside the existing review one). Documented as a deviation from the planning note. Built bundle: `dist/webview/history/index.js` ~154 KB minified. Side-by-side with `dist/webview/index.js` (~360 KB review). History webview is read-only in v0.2 — no diff rendering, just session list + per-turn file-level summary. Full diff replay deferred to Phase β Revisit.
+- **Completed At:** 2026-05-12 00:05
+
+  - [x] Subtask: Add `webview/history/` alongside existing `webview/*` (rejected literal reorg; same outcome with smaller blast radius)
+  - [x] Subtask: esbuild dual webview bundle with shared opts factored into `sharedWebviewOpts`
+  - [x] Subtask: `src/historyPanel.ts` (~150 lines) mirrors review panel CSP/nonce/ready-gate lifecycle
+  - [x] Subtask: React tree: `App` → `SessionList` (left) + `SessionDetail` (right with per-turn cards)
+  - [x] Subtask: `claudeReview.openHistory` command wired to real panel (logger placeholder replaced)
+  - [x] Subtask: Crash-recovery toast's "Open History" button reaches the real panel
+  - [x] Subtask: `src/history/historyTypes.ts` extracted so webview can import `SessionIndexEntry` without dragging Node modules through tsconfig
+
+#### ✅ Task 9.2.9 — Per-hunk undo (latest turn)
+- **Status:** [x]
+- **Complexity:** M
+- **Files:** `src/reviewOrchestrator.ts` (`handleUndoHunkDecision`), `webview/components/HunkBlock.tsx` (↶ button), `src/messages.ts` (`undo-hunk-decision`), `src/reviewPanel.ts` (dispatch), `tests/integration/orchestrator.set.test.ts` (3 new tests)
+- **Notes:** Simpler than the spec implied — set-based foundation makes within-turn undo a single inverse-toggle on `acceptedSet` + status flip back to `pending`. No need for `historyService.undoLatestTurnHunk` reconstruction in v0.2 (the in-memory set has the state). Goes through the same per-file mutex as forward decisions. Cross-turn undo (rebase semantics) stays Phase β, gated by `claudeReview.history.crossTurnUndo`. The audit gap (undo not yet emitted as a distinct event in the log) is documented; Phase β emits explicit `undo` events with cascade tracking. Test infrastructure improvement: harness now exposes `writeCalls[]` not just `writes` Map so tests can count repeat writes to the same file.
+- **Completed At:** 2026-05-12 00:10
+
+  - [x] Subtask: New `undo-hunk-decision { filePath, hunkIndex }` in `WebviewToHost`
+  - [x] Subtask: `handleUndoHunkDecision` inverse-toggles the set via `applyHunkSetChange` and flips `hunk.status` to `pending`
+  - [x] Subtask: "↶ Undo" button on decided hunks in `<HunkBlock>` (hidden on pending hunks)
+  - [x] Subtask: No-op on pending hunks (defensive)
+
+#### ✅ Task 9.2.10 — Retention sweeper
+- **Status:** [x]
+- **Complexity:** S
+- **Files:** `src/extension.ts` (10-min `setInterval` schedule), `src/history/historyService.ts` (`sweep` reference-scanning logic)
+- **Notes:** Sweeper logs only when it removes something. Status-bar soft-cap warning deferred (no `maxBlobBytes` measurement yet — defer to Phase β if real usage shows growth).
+- **Completed At:** 2026-05-11 05:52
+
+  - [x] Subtask: 10-min `setInterval`; disposed via `context.subscriptions`
+  - [x] Subtask: Reference-scanning sweep (live sessions' blobs preserved)
+
+#### ✅ Task 9.2.11 — Crash recovery
+- **Status:** [x]
+- **Complexity:** M
+- **Files:** `src/extension.ts` (activation toast), `src/history/historyReader.ts` (`findResumeCandidates`)
+- **Notes:** Toast offers `Open History` (wired to `claudeReview.openHistory`, which currently surfaces session metadata via Output Channel until M9.2.8 ships the real panel). Reconstruction-to-`SessionReview` and hash-vs-disk comparison deferred to Phase β Revisit surface where it's needed.
+- **Completed At:** 2026-05-11 05:53
+
+  - [x] Subtask: Activation reads candidates (7-day window)
+  - [x] Subtask: Toast with `Open History` / `Dismiss` actions
+  - [x] Subtask: Open-turn detection logic in reader
+
+#### ✅ Task 9.2.12 — `.gitignore` prompt
+- **Status:** [x]
+- **Complexity:** XS
+- **Files:** `src/extension.ts` (`maybePromptGitignore` helper)
+- **Notes:** Only fires for workspace-scope installs (user-scope event logs live outside the project tree under `~/.claude/`). Only prompts if `.gitignore` exists and lacks the entry. Persists `claudeReview.gitignoreAsked = true` in `workspaceState` regardless of answer.
+- **Completed At:** 2026-05-11 05:54
+
+  - [x] Subtask: Detect first-write condition (per workspace via `workspaceState` flag)
+  - [x] Subtask: Inject `.claude/review-history/` on accept
+  - [x] Subtask: Persist suppression flag
+
+#### ✅ Task 9.2.13 — Acceptance tests T1-A1 through T1-A8
+- **Status:** [x] (subset for built tasks; T1-A5/A6 deferred with 9.2.8/9.2.9)
+- **Complexity:** M
+- **Files:** `tests/unit/historyEvents.test.ts` (8), `tests/unit/historyBlobs.test.ts` (7), `tests/integration/history.writer-reader.test.ts` (8), `tests/integration/history.service.test.ts` (8)
+- **Notes:** 31 new tests total; full suite 195 → 226 green. T1-A5 (History panel tree) and T1-A6 (per-hunk undo) defer with M9.2.8 / M9.2.9 to the next wave when the UI lands.
+- **Completed At:** 2026-05-11 06:00
+
+  - [x] Subtask: T1-A1 schema validation
+  - [x] Subtask: T1-A2 JSONL rollover at 5 MB (1100 appends of 5KB messages produces 2+ segments)
+  - [x] Subtask: T1-A3 blob dedupe by SHA-256
+  - [x] Subtask: T1-A4 streaming reader on large file + malformed-line tolerance
+  - [-] Subtask: T1-A5 history panel tree renders (deferred → M9.2.8 wave)
+  - [-] Subtask: T1-A6 per-hunk undo via mutex (deferred → M9.2.9 wave)
+  - [x] Subtask: T1-A7 retention sweeper removes expired
+  - [x] Subtask: T1-A8 crash recovery resume toast (`findResumeCandidates` exercises open-turn detection)
+
+---
+
+### 🏁 Milestone 9.3 — User-Level Hook Install (Track 2)
+**Status:** [x] Complete
+**Complexity:** M
+**Acceptance Criteria:** All T2-* acceptance tests per spec §4.7 green. Fresh install on machine with no prior hooks writes to `~/.claude/settings.json` with marker entries. Two unrelated workspaces share the install. Switch-scope command preserves foreign keys. v0.1.0 users get one-time migration prompt.
+**Depends On:** none (parallel with M9.1/M9.2)
+**Completed At:** 2026-05-11 05:35 (9 new T2-* tests passing; 195/195 suite total)
+
+#### ✅ Task 9.3.1 — Add `claudeReview.installScope` config
+- **Status:** [x]
+- **Complexity:** XS
+- **Files:** `package.json`
+- **Completed At:** 2026-05-11 05:25
+
+  - [x] Subtask: Enum `'user'` | `'workspace'`, default `'user'`
+  - [x] Subtask: Documented description
+
+#### ✅ Task 9.3.2 — `resolveInstallPath` in hookConfigurator
+- **Status:** [x]
+- **Complexity:** M
+- **Files:** `src/hookConfigurator.ts`
+- **Notes:** `resolveInstallPath(scope, workspaceRoot)` is exported and pure (testable directly). Added `InstallScope` type, `RemoveHooksOptions`, and `hasInstalledHooks` probe for collision detection / migration. Removed dead `pathsFor` helper.
+- **Completed At:** 2026-05-11 05:28
+
+  - [x] Subtask: User scope → `path.join(os.homedir(), '.claude', 'settings.json')`
+  - [x] Subtask: Preserve `HOOK_MARKER_KEY` foreign-key protection
+  - [x] Subtask: Surface FS errors to caller (extension.ts shows actionable toast)
+  - [x] Subtask: Create `~/.claude/` directory if missing via `fs.mkdir(... recursive)`
+
+#### ✅ Task 9.3.3 — `switchInstallScope` command
+- **Status:** [x]
+- **Complexity:** S
+- **Files:** `src/extension.ts`, `package.json`
+- **Completed At:** 2026-05-11 05:30
+
+  - [x] Subtask: Register `claudeReview.switchInstallScope` command
+  - [x] Subtask: Remove marked hooks from old scope, write to new scope
+  - [x] Subtask: Surface success toast with scope changed
+  - [x] Subtask: Persist via `config.update('installScope', target, ConfigurationTarget.{Global|Workspace})`
+
+#### ✅ Task 9.3.4 — Collision detection at activation
+- **Status:** [x]
+- **Complexity:** XS
+- **Files:** `src/extension.ts`, `src/hookConfigurator.ts`
+- **Completed At:** 2026-05-11 05:32
+
+  - [x] Subtask: Scan both scopes at activation via `hasInstalledHooks`
+  - [x] Subtask: When both populated and current scope is user → warn user; document that workspace is more-specific
+
+#### ✅ Task 9.3.5 — v0.1.0 migration prompt
+- **Status:** [x]
+- **Complexity:** S
+- **Files:** `src/extension.ts`
+- **Notes:** Persists `claudeReview.migrationV1Asked` in `globalState`. Quietly persists on "no migration needed" so we don't ask again. Stay/Migrate updates the workspace setting + flag; Decide later leaves the flag false (will ask next activation).
+- **Completed At:** 2026-05-11 05:33
+
+  - [x] Subtask: Check `globalState.claudeReview.migrationV1Asked`
+  - [x] Subtask: If workspace-marked hooks exist + flag false → 3-option prompt
+  - [x] Subtask: Persist flag regardless of outcome
+
+#### ✅ Task 9.3.6 — Acceptance tests T2-1 through T2-5
+- **Status:** [x]
+- **Complexity:** S
+- **Files:** `tests/integration/hookConfigurator.scope.test.ts` (9 tests)
+- **Notes:** Overrides `HOME`/`USERPROFILE` per test so user-scope writes land in a tempdir instead of the real home. T2-5 (permission denied) is platform-conditional — Windows ACLs don't reliably block via chmod from Node, so the assertion is skipped there. All 9 tests pass.
+- **Completed At:** 2026-05-11 05:35
+
+  - [x] Subtask: `resolveInstallPath` direct unit tests for both scopes
+  - [x] Subtask: T2-1 fresh install at user-level
+  - [x] Subtask: T2-2 two workspaces share install
+  - [x] Subtask: T2-3 scope switch preserves foreign keys (both scopes)
+  - [x] Subtask: T2-4 round-trip user → workspace → user clean
+  - [x] Subtask: T2-5 permission denied graceful (POSIX only)
+
+---
+
+### 🏁 Milestone 9.4 — Agent Adapter + OpenCode (Track 3)
+**Status:** [ ]
+**Complexity:** L
+**Acceptance Criteria:** All T3-* acceptance tests per spec §5.7 green. OpenCode session triggers review panel with parity per spec §5.6 (no transcript chat, no sub-agent). Mixed-agent sessions independent. Agent badge renders. Reduced-parity boundaries enforced in UI.
+**Depends On:** M9.1 (HunkSetState), M9.2 (event log knows agentId). Parallel with M9.3.
+
+#### ☐ Task 9.4.1 — Add `agentId` field to session types
+- **Status:** [ ]
+- **Complexity:** XS
+- **Files:** `src/types.ts`
+- **Notes:** Decision: additive only, no rename `ClaudeSession → AgentSession` (Deviation entry to add).
+
+  - [ ] Subtask: `agentId: 'claude-code' | 'opencode'` on `SessionData`
+  - [ ] Subtask: Same field on `SessionReview`
+
+#### ☐ Task 9.4.2 — `AgentAdapter` interface
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** `src/adapters/agentAdapter.ts`
+
+  - [ ] Subtask: Interface per spec §5.2.1
+  - [ ] Subtask: `NormalisedPreToolUse/PostToolUse/Stop` shapes
+  - [ ] Subtask: `HookConfigOpts` shape
+
+#### ☐ Task 9.4.3 — `ClaudeCodeAdapter`
+- **Status:** [ ]
+- **Complexity:** M
+- **Files:** `src/adapters/claudeCodeAdapter.ts`
+
+  - [ ] Subtask: Extract existing hook parsing into adapter methods
+  - [ ] Subtask: `generateHookConfig` returns current Claude Code shape
+  - [ ] Subtask: `resolveTranscriptPath` (for Track 4)
+  - [ ] Subtask: `extractSubagentId` placeholder (filled in Track 5)
+
+#### ☐ Task 9.4.4 — `OpenCodeAdapter` (validate protocol first)
+- **Status:** [ ]
+- **Complexity:** L
+- **Files:** `src/adapters/openCodeAdapter.ts`
+- **Notes:** **Validation step:** check OpenCode docs at implementation time. HTTP first; shell-command bridge fallback if HTTP unsupported.
+
+  - [ ] Subtask: Verify OpenCode hook protocol from current docs
+  - [ ] Subtask: If HTTP supported → config writer for `~/.config/opencode/config.json`
+  - [ ] Subtask: If HTTP unsupported → generate curl-bridge shell script + config to call it
+  - [ ] Subtask: Payload parsers (normalised shapes)
+  - [ ] Subtask: `resolveTranscriptPath` returns null (reduced parity)
+  - [ ] Subtask: `extractSubagentId` returns null (reduced parity)
+
+#### ☐ Task 9.4.5 — Adapter registry
+- **Status:** [ ]
+- **Complexity:** XS
+- **Files:** `src/adapters/index.ts`
+
+  - [ ] Subtask: `agentAdapters: Map<agentId, AgentAdapter>` constant
+  - [ ] Subtask: Helpers `getAdapter(agentId)`, `iterAdapters()`
+
+#### ☐ Task 9.4.6 — Server routes for OpenCode
+- **Status:** [ ]
+- **Complexity:** M
+- **Files:** `src/server.ts`
+
+  - [ ] Subtask: New routes `/opencode/pre-tool-use`, `/opencode/post-tool-use`, `/opencode/stop`
+  - [ ] Subtask: Handler dispatcher: route prefix → `agentAdapters.get('opencode').parse*()`
+  - [ ] Subtask: Existing routes preserved as Claude Code (default)
+  - [ ] Subtask: 404 for unknown route prefixes
+
+#### ☐ Task 9.4.7 — Multi-adapter hook config writer
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** `src/hookConfigurator.ts`
+
+  - [ ] Subtask: `ensureHooksInstalled` iterates over enabled adapters
+  - [ ] Subtask: Each adapter's `generateHookConfig` writes to its agent's config file
+  - [ ] Subtask: Same marker key per adapter (with adapter suffix for OpenCode)
+
+#### ☐ Task 9.4.8 — Agent badge in UI
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** `webview/review/components/SessionHeader.tsx`, `webview/history/components/TurnTree.tsx`
+
+  - [ ] Subtask: Panel header renders 🤖/🌐 + agent name
+  - [ ] Subtask: History panel groups by agent first
+
+#### ☐ Task 9.4.9 — Capability boundary UI
+- **Status:** [ ]
+- **Complexity:** XS
+- **Files:** `webview/review/components/ChatOverlay.tsx`
+
+  - [ ] Subtask: OpenCode sessions show "Transcript context disabled for OpenCode (Phase γ)" banner in chat
+
+#### ☐ Task 9.4.10 — Config `claudeReview.adapters.opencode.enabled`
+- **Status:** [ ]
+- **Complexity:** XS
+- **Files:** `package.json`
+
+  - [ ] Subtask: Boolean, default true
+
+#### ☐ Task 9.4.11 — Acceptance tests T3-1 through T3-5
+- **Status:** [ ]
+- **Complexity:** M
+- **Files:** `tests/integration/adapter.opencode.test.ts`, `tests/e2e/multiAgent.test.ts`
+
+  - [ ] Subtask: T3-1 OpenCode session end-to-end
+  - [ ] Subtask: T3-2 per-hunk parity
+  - [ ] Subtask: T3-3 mixed-agent independence
+  - [ ] Subtask: T3-4 agent badge renders
+  - [ ] Subtask: T3-5 reduced-parity enforced
+
+---
+
+### 🏁 Milestone 9.5 — Transcript-Aware Chat (Track 4)
+**Status:** [ ]
+**Complexity:** M
+**Acceptance Criteria:** All T4-* acceptance tests per spec §6.8 green. Chat answers cite the user's original prompt for the turn; missing transcript falls back silently; malformed JSONL skipped; path traversal rejected; 50 MB transcript streams without exceeding 50 MB heap.
+**Depends On:** M9.4 (`resolveTranscriptPath` is an adapter method)
+
+#### ☐ Task 9.5.1 — `transcriptSchema.ts`
+- **Status:** [ ]
+- **Complexity:** XS
+- **Files:** `src/transcript/transcriptSchema.ts`
+
+  - [ ] Subtask: `TranscriptEntry` discriminated union per spec §6.3
+  - [ ] Subtask: `ContentBlock` types (text, tool_use)
+
+#### ☐ Task 9.5.2 — `transcriptReader.ts` streaming reader
+- **Status:** [ ]
+- **Complexity:** M
+- **Files:** `src/transcript/transcriptReader.ts`
+
+  - [ ] Subtask: `readTranscriptWindow(path, sessionId, filePath, hunkRange): TranscriptWindow`
+  - [ ] Subtask: Stream-parse JSONL line-by-line (no full-file load)
+  - [ ] Subtask: Skip malformed lines with debug log
+  - [ ] Subtask: Truncate per-tool-call `inputSummary` to 1 KB
+  - [ ] Subtask: Locate turn boundary by user-message preceding first matching `tool_use`
+
+#### ☐ Task 9.5.3 — `resolveTranscriptPath` on ClaudeCodeAdapter
+- **Status:** [ ]
+- **Complexity:** XS
+- **Files:** `src/adapters/claudeCodeAdapter.ts`
+
+  - [ ] Subtask: Encode `cwd` (strip drive letter, replace `[\\/]` with `-`)
+  - [ ] Subtask: Join under `os.homedir() + '/.claude/projects/'`
+
+#### ☐ Task 9.5.4 — Path-traversal guard
+- **Status:** [ ]
+- **Complexity:** XS
+- **Files:** `src/transcript/transcriptReader.ts`
+
+  - [ ] Subtask: Resolved path MUST start with `~/.claude/projects/`
+  - [ ] Subtask: Reject before file open; log security event
+
+#### ☐ Task 9.5.5 — System prompt v2
+- **Status:** [ ]
+- **Complexity:** XS
+- **Files:** `src/anthropicClient.ts`
+
+  - [ ] Subtask: Bump `PROMPT_VERSION = 'v2'`
+  - [ ] Subtask: New system prompt body per spec §6.5
+
+#### ☐ Task 9.5.6 — Inject transcript context in chat message
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** `src/chatService.ts`
+
+  - [ ] Subtask: Resolve transcript path via active adapter
+  - [ ] Subtask: Construct `transcriptContext` block per spec §6.6
+  - [ ] Subtask: Skip if `chat.transcriptContext = false`
+
+#### ☐ Task 9.5.7 — Config `claudeReview.chat.transcriptContext`
+- **Status:** [ ]
+- **Complexity:** XS
+- **Files:** `package.json`
+
+  - [ ] Subtask: Boolean, default true
+
+#### ☐ Task 9.5.8 — Update threat-model docs
+- **Status:** [ ]
+- **Complexity:** XS
+- **Files:** `docs/TRD-Claude-Code-Diff-Review-Extension.md`
+
+  - [ ] Subtask: §14 asset table: add transcript as workspace-sensitive
+  - [ ] Subtask: §14 forbidden patterns: transcript MUST NEVER reach webview
+
+#### ☐ Task 9.5.9 — Acceptance tests T4-1 through T4-5
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** `tests/unit/transcriptReader.test.ts`, `tests/integration/chat.transcript.test.ts`
+
+  - [ ] Subtask: T4-1 cites original prompt
+  - [ ] Subtask: T4-2 missing transcript fallback
+  - [ ] Subtask: T4-3 malformed JSONL tolerated
+  - [ ] Subtask: T4-4 path traversal rejected
+  - [ ] Subtask: T4-5 50 MB streams under heap budget
+
+---
+
+### 🏁 Milestone 9.6 — Sub-Agent Attribution (Track 5)
+**Status:** [ ]
+**Complexity:** S
+**Acceptance Criteria:** All T5-* acceptance tests per spec §7.4 green. Multi-Task session shows correct sub-agent badges; main-agent-only sessions clean; description truncated to 40 chars in chip; History groups by sub-agent.
+**Depends On:** M9.5 (transcript reader)
+
+#### ☐ Task 9.6.1 — Add `subagentId?` to review types
+- **Status:** [ ]
+- **Complexity:** XS
+- **Files:** `src/types.ts`
+
+  - [ ] Subtask: `subagentId?: string` on `FileReview`, `HunkReview`
+
+#### ☐ Task 9.6.2 — `extractSubagentId` on ClaudeCodeAdapter
+- **Status:** [ ]
+- **Complexity:** M
+- **Files:** `src/adapters/claudeCodeAdapter.ts`, `src/transcript/transcriptReader.ts`
+
+  - [ ] Subtask: Walk transcript backward from PreToolUse timestamp
+  - [ ] Subtask: Identify enclosing `Task` tool_use (parent_tool_use_id chain)
+  - [ ] Subtask: Return sub-agent description (truncated to 40 chars for chip)
+
+#### ☐ Task 9.6.3 — Wire `extractSubagentId` into onPreToolUse
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** `src/extension.ts`, `src/reviewOrchestrator.ts`
+
+  - [ ] Subtask: Call from `onPreToolUse` handler
+  - [ ] Subtask: Persist on `FileReview`/`HunkReview` when computed
+
+#### ☐ Task 9.6.4 — Sub-agent chip in file list + hunk tooltip
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** `webview/review/components/FileList.tsx`, `webview/review/components/HunkBlock.tsx`
+
+  - [ ] Subtask: Chip render with 40-char truncation
+  - [ ] Subtask: Tooltip with full description
+
+#### ☐ Task 9.6.5 — History panel sub-agent grouping
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** `webview/history/components/TurnTree.tsx`
+
+  - [ ] Subtask: Group turns by sub-agent inside their parent turn
+  - [ ] Subtask: Render counts ("Main: 3 files / Task: refactor-auth: 2 files")
+
+#### ☐ Task 9.6.6 — Acceptance tests T5-1 through T5-4
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** `tests/unit/subagent.test.ts`, `tests/e2e/multiAgent.subagent.test.ts`
+
+  - [ ] Subtask: T5-1 attribution from Task tool
+  - [ ] Subtask: T5-2 main-agent-only clean
+  - [ ] Subtask: T5-3 truncation 40 chars
+  - [ ] Subtask: T5-4 history groups by sub-agent
+
+---
+
+### 🏁 Milestone 9.7 — Phase α Acceptance & Release
+**Status:** [ ]
+**Complexity:** M
+**Acceptance Criteria:** All Phase α exit gates from spec §1.5 green. All existing 173 tests + new tests pass. Perf bench P99 ≤ 1.5 s on 50-file/2000-line fixture. v0.2.0 packaged + smoke-tested.
+**Depends On:** M9.1, M9.2, M9.3, M9.4, M9.5, M9.6
+
+#### ☐ Task 9.7.1 — Cross-track full-loop E2E
+- **Status:** [ ]
+- **Complexity:** M
+- **Files:** `tests/e2e/phaseAlpha.fullLoop.test.ts`
+
+  - [ ] Subtask: Claude Code session → event log → history panel → per-hunk undo
+  - [ ] Subtask: OpenCode session in parallel; assert independence
+
+#### ☐ Task 9.7.2 — Perf bench under Phase α pipeline
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** `tests/perf/phaseAlpha.bench.test.ts`
+
+  - [ ] Subtask: 50 files / 2000 lines fixture
+  - [ ] Subtask: Assert P99 panel-open ≤ 1.5 s
+  - [ ] Subtask: Assert set-render P99 ≤ 200 ms
+
+#### ☐ Task 9.7.3 — Telemetry events wired
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** `src/telemetry.ts`
+
+  - [ ] Subtask: `history.turn.started/stopped`
+  - [ ] Subtask: `transcript.used`
+  - [ ] Subtask: `hunkSet.toggle`
+  - [ ] Subtask: `agent.session`
+
+#### ☐ Task 9.7.4 — Manifest bump + new commands/config
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** `package.json`
+
+  - [ ] Subtask: Version 0.1.0 → 0.2.0
+  - [ ] Subtask: Register all new commands per spec §9.2
+  - [ ] Subtask: Register all new config keys per spec §9.1
+
+#### ☐ Task 9.7.5 — README + CHANGELOG
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** `README.md`, `CHANGELOG.md`
+
+  - [ ] Subtask: README: user-level install as default; multi-agent; History panel; transcript-aware chat
+  - [ ] Subtask: CHANGELOG: 0.2.0 entry with all Phase α features
+
+#### ☐ Task 9.7.6 — Regression: CSP + API-key-leak still green
+- **Status:** [ ]
+- **Complexity:** XS
+- **Files:** existing security tests
+
+  - [ ] Subtask: `npm test` → all 173 existing + new tests pass
+
+#### ☐ Task 9.7.7 — Tag + package + smoke-test
+- **Status:** [ ]
+- **Complexity:** S
+- **Files:** repo root
+
+  - [ ] Subtask: `npm version 0.2.0`
+  - [ ] Subtask: `vsce package`
+  - [ ] Subtask: Install `.vsix` in fresh VS Code; run a Claude Code session; verify full loop
+
+---
+
 ## 🔀 Deviations & Decisions Log
 
 | # | Date | Decision | Reason | Impact |
@@ -383,6 +1051,12 @@
 | 13 | 2026-05-10 | **Host-side `webviewReady` gate before flushing posts** | Browser `MessageEvent`s do not queue. Host was posting `init` via `setImmediate` before the React tree had mounted and registered its `message` listener. First session sometimes won the race; subsequent Stop-hook-triggered re-inits frequently lost it, leaving the panel stuck at "Waiting for Claude Code session…". | Each `PanelEntry` carries a `webviewReady: boolean` (false at panel creation). `scheduleFlush` is a no-op until `ready`. The webview's `App.tsx` already sends `{type: 'ready'}` on mount; the host's `dispatch('ready')` flips the flag and flushes. Re-mounts (e.g., editor-group moves) re-fire `ready` and re-flush. `openOrFocus` on an existing panel also clears stale pending posts so the new init isn't preceded by obsolete updates. |
 | 15 | 2026-05-11 | **Denormalised file indexes for O(1) lookup** | `SessionReview.files: FileReview[]` was scanned linearly via `.find(f => f.filePath === absFile)` on every `handleHunkAction`, `handleBulk`, `scheduleReDiff`, `ChatService.start`, and `CodeLensProvider.findHunksForFile`. With the 200-file cap that's up to 200 ops per click; with cross-session CodeLens lookup it's O(sessions × files). | Added two private maps on `ReviewOrchestrator`: `byPath: Map<SessionId, Map<AbsPath, FileReview>>` for per-session O(1) lookup, and `globalByPath: Map<AbsPath, { sessionId; file }>` for cross-session O(1) lookup. Both share references with the canonical `session.files: FileReview[]` array (so in-place mutations propagate); maintained only on session lifecycle (`indexFiles` on open, `unindexSession` on dismiss). New public `orchestrator.findFile(filePath)` for cross-session callers. CodeLens slow-path retained as a Win32 path-shape safety net. **Result: perf bench median 630→363 ms (≈42% faster) at the 50-file workload.** Wire format unchanged — webview still receives the array. |
 | 14 | 2026-05-11 | **Per-file mutex on action paths; FS failures surfaced; bulk-reject fast path; +8 concurrency tests** | Manual review of action paths surfaced: (a) two parallel reject clicks could both `fs.readFile` the same starting content and the second write would clobber the first; (b) `fs.readFile` / `fs.writeFile` failures bubbled up silently — user saw nothing change after a click; (c) per-hunk reverts can drift across hunks via context-shift, while bulk-rejecting a fully-pending file is equivalent to writing the snapshot once. | Added `fileLocks: Map<AbsPath, Promise<unknown>>` Promise-chain mutex on the orchestrator. `handleHunkAction`, `handleBulk`, and `revertFileToSnapshot` all acquire the per-file lock; same-file actions serialise, different files run in parallel via `Promise.all`. `applyReject` now distinguishes `fuzz` vs `fs` failures and surfaces the latter via two new `FileWarning` kinds (`write-failed`, `read-failed`) which `<DiffPane>` renders with a "Revert to snapshot" recovery button. Bulk-reject fast-paths to a single `writeFile(file.before)` when every hunk is still pending. Eight integration tests in `tests/integration/actionConcurrency.test.ts` exercise: same-file racing, mixed accept/reject racing, cross-file parallelism, fast-path write count, FS-failure surfacing + retry, snapshot-revert FS failure, accept idempotency, accept-then-reject-on-decided no-op. |
+| 16 | 2026-05-11 | **Phase α: user-level hook install as default** (Q1) | Per-project install was a per-workspace activation barrier. User-level (`~/.claude/settings.json`) means every Claude Code session on the machine is reviewed automatically with zero per-project setup. Defends against hunkwise's positioning + dramatically lifts activation. | New config `claudeReview.installScope: 'user' \| 'workspace'`, default `'user'`. v0.1.0 users get one-time migration prompt. Path scheme for event log: `~/.claude/review-history/<sha256(workspace)[:16]>/` when scope=user. |
+| 17 | 2026-05-11 | **Phase α: keep `SessionData` type name; add `agentId` field only** | Spec §5.2.2 called for renaming `ClaudeSession → AgentSession`. Codebase audit showed cascade through 7 modules (types, snapshotStore, reviewOrchestrator, reviewPanel, server, extension, messages) with no architectural payoff — adapters dispatch on `agentId` field regardless of type name. | Smaller blast radius; cleaner diff; faster ship. Field added only. Documented for future readers: "Session" here means agent session, agent-agnostic by virtue of the field. |
+| 18 | 2026-05-11 | **Phase α: Track 6 (set-based reversibility) ships before Track 1 (event log)** | Event log records each decision AFTER the set-based write succeeds. Doing Track 1 first would force a second integration when Track 6 changes the write path. | Hard ordering in M9 milestones: M9.1 must complete before M9.2 wires `historyService.recordHunkDecided` to the new write pipeline. Plans treat M9.2 as a strict successor to M9.1. |
+| 19 | 2026-05-11 | **Phase α: OpenCode reduced parity for v1** (Q3) | Adapter pattern is the structural win; full feature parity with Claude Code (transcript-aware chat, sub-agent attribution) requires OpenCode-specific transcript readers and Task-tool equivalents that may not exist in OpenCode at all. | Phase α ships OpenCode with hook capture + per-hunk review + event log; chat shows "Transcript context disabled for OpenCode (Phase γ)" boundary. Phase γ revisits if/when OpenCode exposes equivalents. HTTP-first; shell-command bridge fallback if OpenCode lacks HTTP hooks. |
+| 20 | 2026-05-11 | **Phase α: History panel as a separate webview, not nested tab** (Q2.4) | History panel has different lifecycle and persistence semantics from the live review panel (read-only most of the time, opens any time, may show data for sessions where no review panel exists). Nesting them as tabs would couple lifecycles unnecessarily. | New viewType `claudeReview.history` registered. `webview/` reorganised into `webview/review/` + new `webview/history/`. New module `src/historyPanel.ts` mirrors `src/reviewPanel.ts` lifecycle. |
+| 21 | 2026-05-11 | **Phase α: cross-turn undo behind dev-mode flag** (Q2.3) | Cascade conflicts on cross-turn undo can corrupt workspaces (real risk per MEMORY-DESIGN.md §5 rebase semantics). v1 data on real users will inform safer default. | Config `claudeReview.history.crossTurnUndo: false` default. Within-turn undo (the "↶" icon on decided hunks in the active panel) always on. History panel surfaces cross-turn undo only when flag enabled. |
 
 ## 🧱 Tech Debt & TODOs
 
@@ -463,3 +1137,303 @@
 3. Onboarding flow: first-run notification with a quick-start ("Set OAuth token, run `claude`")
 4. Optional: revisit axe-core a11y test now that test runner is more mature
 5. Optional: install the produced VSIX in a real VS Code (not dev-host) to validate the marketplace install flow before publishing
+
+---
+
+### Session 2 — 2026-05-11 04:00 (Phase α planning)
+**Summary:** Authored strategy doc stack (COMPETITOR-FEEDBACK.md, ECOSYSTEM-ROADMAP.md, PHASE-ALPHA-IMMEDIATE.md, PHASE-BETA-NEXT.md). Resolved all 7 open questions from PHASE-ALPHA-IMMEDIATE.md §11. Approved Phase α implementation plan at `~/.claude/plans/phase-alpha-immediate-md-new-cosmic-pearl.md`. Added Phase 9 to tracker with 7 milestones + 53 tasks.
+
+**Completed:**
+- [x] Strategic synthesis: competitor analysis, ecosystem framing, phased roadmap (4 docs in `..parent/` dir)
+- [x] Phase α implementation spec (PHASE-ALPHA-IMMEDIATE.md) — 6 tracks, 28 acceptance test IDs
+- [x] Phase β implementation spec (PHASE-BETA-NEXT.md) — 4 surfaces, 40 acceptance test IDs
+- [x] Resolved 7 open questions via user via AskUserQuestion
+- [x] Codebase audit vs Phase α spec (parallel Explore agents)
+- [x] Plan file at `~/.claude/plans/phase-alpha-immediate-md-new-cosmic-pearl.md` (approved)
+- [x] Tracker Stats block updated; Phase 9 inserted with M9.1–M9.7; 6 new Deviation entries (#16–#21)
+
+**Files Changed:**
+- `../PHASE-ALPHA-IMMEDIATE.md` — created (parent-dir companion spec)
+- `../PHASE-BETA-NEXT.md` — created (parent-dir companion spec)
+- `../COMPETITOR-FEEDBACK.md` — created (market analysis)
+- `../ECOSYSTEM-ROADMAP.md` — created (strategic framing)
+- `../MEMORY-DESIGN.md` — already existed (Phase α leverages directly)
+- `PROJECT_TRACKER.md` — Stats block, Phase 9 inserted, 6 new Deviation entries, Session 2 log
+
+**Dependencies Added:** none (planning session only)
+
+**Decisions (all logged as Deviations #16–#21):**
+- D16: User-level hook install as default (Q1)
+- D17: Keep `SessionData` name; additive `agentId` field (Type Q)
+- D18: Track 6 ships before Track 1 (execution order)
+- D19: OpenCode reduced parity for v1 (Q3)
+- D20: History panel = separate webview (Q2.4)
+- D21: Cross-turn undo behind dev-mode flag (Q2.3)
+
+Other resolved (defaults adopted from spec recommendation, no new Deviation needed):
+- Q2.1 exclude globs: spec defaults
+- Q2.2 retention: 30 days
+- Q2.5 .gitignore injection: prompt once per workspace
+- Q4 transcript resilience: fail-open
+- Q5 sub-agent UI density: default on, 40-char chip + tooltip
+- Q6 path scheme: `~/.claude/review-history/<sha256(workspace)[:16]>/` when user-scope
+- Q7 v0.1.0 migration: one-time prompt
+
+**Deviations:**
+- See entries #16–#21 in Deviations & Decisions Log
+
+**Tech Debt Introduced:** none (planning only)
+
+**Next Session Should:**
+1. **Begin M9.1.1** — add `HunkSetState` and `RenderResult` types to `src/types.ts`
+2. After M9.1 complete, **M9.2 + M9.3 + M9.4 in parallel** — these touch independent code paths
+3. **M9.5 strictly after M9.4** — transcript reader is an adapter method
+4. **M9.6 strictly after M9.5** — sub-agent attribution piggybacks on transcript reader
+5. **M9.7 final** — release gate; perf bench + smoke test + tag v0.2.0
+6. Per CLAUDE.md: update tracker immediately after each task; never batch
+7. Validate OpenCode hook protocol assumption (Task 9.4.4) at implementation time before writing the adapter
+
+---
+
+### Session 3 — 2026-05-11 05:15 (M9.1 — Set-Based Reversibility Foundation)
+**Summary:** Completed Phase α Milestone 9.1 in full. Set-based reversibility is the foundation primitive that the rest of Phase α and all of Phase β builds on. 13 new tests added (9 unit + 4 integration); 186/186 total green.
+
+**Completed:**
+- [x] **M9.1.1** `HunkSetState` and `RenderResult` types in `src/types.ts`
+- [x] **M9.1.2** Pure-function `renderFileFromHunkSet` + `initialHunkSetState` helper in `src/core/hunkSet.ts`
+- [x] **M9.1.3** Turn-aware fields (`currentTurnId`, `turnStartedAt`) and `beginTurnIfNeeded` / `endTurn` methods on `SnapshotStore`
+- [x] **M9.1.4** Orchestrator refactored: `applyHunkSetChange` is the single write primitive routed through by `handleHunkAction`, `handleBulk`, and `revertFileToSnapshot`. New `postSetConflict` on `PanelGateway` wired through `ReviewPanelManager`. Legacy `applyReject` removed.
+- [x] **M9.1.5** Initial-state migration: `openReview` seeds `acceptedSet = all hunk indices`. No user-visible behaviour change vs v0.1.0.
+- [x] **M9.1.6** T6-1 through T6-5 acceptance tests + 4 integration tests for the orchestrator/set wiring
+
+**Files Changed:**
+- `src/types.ts` — added `HunkSetState`, `RenderResult`; extended `SessionData` with turn fields
+- `src/core/hunkSet.ts` — created (101 lines, pure)
+- `src/snapshotStore.ts` — added `beginTurnIfNeeded` + `endTurn`; added `crypto` import
+- `src/reviewOrchestrator.ts` — added `hunkSets` map, `applyHunkSetChange`, `indexHunkSets`/`unindexHunkSets`, `setsEqual` helper; refactored `handleHunkAction`, `handleBulk`, `revertFileToSnapshot`; wired `endTurn` into `handleStop`; updated `reDiff` to rebuild HunkSetState; removed `applyReject`
+- `src/messages.ts` — added `set-conflict-warning` to `HostToWebview` discriminated union
+- `src/reviewPanel.ts` — added `postSetConflict` to wire the new message kind
+- `tests/unit/reviewOrchestrator.test.ts`, `tests/unit/codeLensProvider.test.ts`, `tests/integration/actionConcurrency.test.ts`, `tests/integration/chatService.test.ts`, `tests/integration/memoryLeak.test.ts`, `tests/integration/perf.bench.test.ts` — added `postSetConflict` stub to each `PanelGateway` impl
+- `tests/unit/hunkSet.test.ts` — created (9 tests)
+- `tests/integration/orchestrator.set.test.ts` — created (4 tests)
+
+**Dependencies Added:** none (`crypto.randomUUID` is Node built-in)
+
+**Decisions:**
+- Skipped the spec-mandated rename `SessionData → AgentSession` (Deviation #17, decided in planning Session 2). Confirmed during implementation that the additive `agentId` field will cover Track 3 needs.
+- Added a `setsEqual` short-circuit in `applyHunkSetChange` to preserve v0.1.0's "accept-on-applied is a free no-op" invariant.
+- Simplified `revertFileToSnapshot`: removed the double-write fallback. The empty-set render path is provably equivalent and the fallback was masking FS-failure handling.
+- T6-3 fixture switched from out-of-bounds line numbers to multi-line context mismatch (4 mismatching context lines exceed `fuzzFactor:2` tolerance). jsdiff's fuzz is more permissive than the spec language implied.
+
+**Deviations:** none new in this session — all aligned with prior planning entries #16–#21.
+
+**Tech Debt Introduced:** none
+
+**Next Session Should:**
+1. **M9.2 — Memory Design Substrate** (XL, Track 1). Start with `historyEvents.ts` schema + `historyBlobs.ts` blob store.
+2. **M9.3 — User-Level Hook Install** can start in parallel (independent code path).
+3. The orchestrator now has `currentTurnId` from the store; M9.2 wires `historyService.recordHunkDecided` AFTER the `applyHunkSetChange` succeeds.
+4. Confirm path scheme for the event log root: `~/.claude/review-history/<workspace-hash>/` (Q6 already resolved).
+
+---
+
+### Session 4 — 2026-05-11 06:00 (M9.2 substrate + M9.3 complete in parallel)
+**Summary:** Shipped M9.3 (user-level hook install, all 5 tasks + acceptance tests) and the 11-of-13 testable parts of M9.2 (Memory Design substrate end-to-end: schema, blob store, JSONL writer, streaming reader, index file, service orchestrator, orchestrator+extension wiring, retention sweeper, crash recovery toast, .gitignore prompt, acceptance tests). 40 new tests; 186 → 226 green.
+
+**Completed (M9.3):**
+- [x] **9.3.1** `claudeReview.installScope` config (`user` default)
+- [x] **9.3.2** `resolveInstallPath(scope, workspaceRoot)` + `hasInstalledHooks` probe
+- [x] **9.3.3** `claudeReview.switchInstallScope` command (palette-accessible)
+- [x] **9.3.4** Collision detection at activation (both scopes carry marker → warn)
+- [x] **9.3.5** v0.1.0 → v0.2.0 migration prompt (one-time, `globalState.migrationV1Asked`)
+- [x] **9.3.6** T2-* acceptance tests (9 tests; `HOME`/`USERPROFILE` overrides per test)
+
+**Completed (M9.2 substrate):**
+- [x] **9.2.1** `historyEvents.ts` — schema + Zod validators + `decodeEvent` tolerant decode
+- [x] **9.2.2** `historyBlobs.ts` — content-addressed BlobStore, two-level shard, atomic write
+- [x] **9.2.3** `historyWriter.ts` — JSONL append, 5 MB segment rollover, monotonic event ids
+- [x] **9.2.4** `historyReader.ts` — streaming line-by-line, malformed-tolerant, `findResumeCandidates`
+- [x] **9.2.5** `historyIndex.ts` — `index.json` atomic maintenance + in-memory cache
+- [x] **9.2.6** `historyService.ts` — record*, listSessions, readEvents, readBlob, sweep, `resolveHistoryRoot` (Q6 path scheme)
+- [x] **9.2.7** Wire into orchestrator + extension — `recordTurnStarted` on first PreToolUse, `recordHunkDecided` post-write (handleHunkAction + handleBulk), `recordTurnStopped` on openReview, `recordFileSnapshotReverted` on snapshot revert
+- [x] **9.2.10** Retention sweeper — 10-min `setInterval`, reference-scanning
+- [x] **9.2.11** Crash recovery toast at activation (7-day window)
+- [x] **9.2.12** `.gitignore` prompt (workspace-scope only, one-time per workspace)
+- [x] **9.2.13** Acceptance tests T1-A* (subset: A1, A2, A3, A4, A7, A8; A5/A6 deferred with UI)
+
+**Deferred from M9.2 (next wave):**
+- [ ] **9.2.8** Webview reorg + History panel UI (large — own wave)
+- [ ] **9.2.9** Per-hunk undo `↶` icon in webview (depends on 9.2.8 reorg)
+
+**Files Changed:**
+- `src/history/{historyEvents,historyBlobs,historyWriter,historyReader,historyIndex,historyService}.ts` — created
+- `src/hookConfigurator.ts` — added `InstallScope`, `RemoveHooksOptions`, `resolveInstallPath`, `hasInstalledHooks`; refactored ensure/remove to accept scope
+- `src/snapshotStore.ts` — `beginTurnIfNeeded` now returns `{ turnId, freshlyMinted }`
+- `src/reviewOrchestrator.ts` — optional `history`, `agentId` opts; three private record* helpers; `applyHunkSetChange` records `hunk-decided` post-write; `revertFileToSnapshot` records `file-snapshot-reverted`
+- `src/extension.ts` — `HistoryService` construction, retention sweeper schedule, recovery toast, `.gitignore` prompt, `switchInstallScope` command, migration prompt, collision detection, `claudeReview.openHistory` placeholder
+- `package.json` — `claudeReview.installScope`, `history.enabled`, `history.retentionDays`, `history.crossTurnUndo` config keys; `switchInstallScope`, `openHistory` commands
+- `tests/unit/historyEvents.test.ts`, `tests/unit/historyBlobs.test.ts` — created (15 tests)
+- `tests/integration/history.writer-reader.test.ts`, `tests/integration/history.service.test.ts` — created (16 tests)
+- `tests/integration/hookConfigurator.scope.test.ts` — created (9 tests)
+- `tests/unit/hookConfigurator.test.ts` — updated callers to pass `scope`
+
+**Dependencies Added:** none (`zod`, `crypto`, `os`, `readline` all already in tree)
+
+**Decisions (new this session — to be promoted to Deviations log if they survive):**
+- D-S4-1: History panel UI deferred to a dedicated wave (XL on its own). The recovery toast still wires through `claudeReview.openHistory`, which surfaces session metadata via the Output Channel as a placeholder so the command is end-to-end usable.
+- D-S4-2: `HistoryEventInput` uses a distributive `Omit` to preserve discriminated-union narrowing at writer call sites (avoids fragile object-literal type errors in `historyService`).
+- D-S4-3: Retention sweeper logs only when it actually removes something (idle ticks stay silent).
+- D-S4-4: `revertFileToSnapshot` simplified: no double-write fallback. The empty-set render is provably equivalent and the fallback was masking FS-failure handling (caught in M9.1 testing).
+- D-S4-5: Soft-cap warning at 80% of `maxBlobBytes` from spec §3.5 T1-A7 deferred — no measurement infra yet; revisit in Phase β if real usage shows growth.
+
+**Deviations:** none new; all aligned with prior planning entries #16–#21.
+
+**Tech Debt Introduced:**
+- History panel UI still a logger placeholder (M9.2.8 owes a real webview).
+- Per-hunk undo `↶` icon not yet wired (M9.2.9; service-side `undoLatestTurnHunk` not yet exposed because no UI consumes it).
+- `tests/e2e/runTests.cjs` still missing (carried from Session 1 tech debt #1).
+
+**Next Session Should:**
+1. **M9.4 — Agent Adapter + OpenCode** (L, Track 3). Refactor wire format under an adapter interface; ship OpenCode with reduced parity. Independent of M9.2.8/9. Validate OpenCode hook protocol from current docs before writing the adapter (Task 9.4.4).
+2. **M9.2.8 + M9.2.9 (UI)** as a sibling wave: webview reorg, History panel React tree, per-hunk undo button. Can run in parallel with M9.4 — different code paths.
+3. **M9.5 / M9.6** strictly after M9.4 (transcript-aware chat needs `ClaudeCodeAdapter.resolveTranscriptPath`).
+4. Per CLAUDE.md: update tracker immediately after each task; never batch.
+
+---
+
+### Session 5 — 2026-05-12 00:15 (M9.2.8 + M9.2.9 — UI close-out)
+**Summary:** Shipped the History panel webview and per-hunk undo to close out Milestone 9.2. Substrate is now visible to the user end-to-end. 3 new tests; 226 → 229 green.
+
+**Completed:**
+- [x] **9.2.8** History panel webview + extension wiring
+- [x] **9.2.9** Per-hunk undo (within-turn)
+
+**Files Changed:**
+- `webview/history/index.tsx`, `webview/history/App.tsx`, `webview/history/vscode.ts` — created (history webview entry + root + bridge)
+- `webview/history/components/SessionList.tsx`, `webview/history/components/SessionDetail.tsx` — created
+- `webview/components/HunkBlock.tsx` — added ↶ Undo button on decided hunks
+- `src/historyPanel.ts` — created (webview lifecycle manager, ~150 lines)
+- `src/history/historyTypes.ts` — created (pure types extracted to keep webview tsconfig Node-free)
+- `src/history/historyIndex.ts` — re-exports `SessionIndexEntry`/`HistoryIndex` from `historyTypes.ts`
+- `src/messages.ts` — new `HistoryWebviewToHost`/`HistoryHostToWebview` protocol, `parseHistoryWebviewMessage`, `undo-hunk-decision` added to `WebviewToHost`
+- `src/reviewPanel.ts` — dispatches `undo-hunk-decision` to orchestrator
+- `src/reviewOrchestrator.ts` — new `handleUndoHunkDecision` (set inverse-toggle + status flip to pending)
+- `src/extension.ts` — `openHistory` command now opens the real panel; `historyPanel` lazy-constructed on demand
+- `esbuild.config.mjs` — second webview bundle target (`dist/webview/history/index.js`), shared opts factored
+- `package.json` — `openHistory` command unchanged (was already registered); no new entries
+- `tests/integration/orchestrator.set.test.ts` — 3 new undo tests, harness exposes `writeCalls[]`
+
+**Dependencies Added:** none
+
+**Decisions (new this session):**
+- D-S5-1: Skipped the literal `webview/* → webview/review/*` rename. Added `webview/history/` alongside instead. Identical outcome, zero risk to existing review panel. Documented in 9.2.8 task notes.
+- D-S5-2: History panel is read-only in v0.2. No diff rendering, no per-hunk decisions from the History panel. Decision actions stay on the live review panel. The History panel surfaces session list + turn timeline + file-level decision summary — enough for crash-recovery glance and audit.
+- D-S5-3: Extracted `src/history/historyTypes.ts` (pure types, zero Node imports) so the webview tsconfig can pull in `SessionIndexEntry`/`HistoryIndex` without dragging `node:fs` etc. transitively. `historyIndex.ts` re-exports from the new file.
+- D-S5-4: Per-hunk undo is a single inverse-toggle on the set — no need for `historyService.undoLatestTurnHunk` reconstruction in v0.2 because the in-memory `HunkSetState` already holds the truth. Cross-turn undo (rebase semantics) stays Phase β, gated by `claudeReview.history.crossTurnUndo`.
+- D-S5-5: Undo is not yet emitted as a distinct `undo` event in the log (audit gap). Phase β Revisit emits explicit `undo` events with cascade tracking.
+
+**Deviations:** none new; D-S5-1 documents an explicit choice to interpret the planning note's "reorg" loosely (additive new dir instead of rename).
+
+**Tech Debt Introduced:**
+- Audit gap for within-turn undo (D-S5-5) — minor; Phase β addresses.
+- History panel doesn't show diff content yet, just metadata — full diff replay is Phase β Revisit.
+
+**Next Session Should:**
+1. **M9.4 — Agent Adapter + OpenCode** (L, Track 3). Wire format already mostly agent-agnostic; add `agentId` field + adapter dispatch + OpenCode bridge. Validate OpenCode hook protocol from current docs before writing the adapter.
+2. **M9.5 — Transcript-Aware Chat** strictly after M9.4 (uses `ClaudeCodeAdapter.resolveTranscriptPath`).
+3. **M9.6 — Sub-agent attribution** strictly after M9.5 (uses transcript reader).
+4. **M9.7 — Phase α Release** at the end (perf bench + smoke test + tag v0.2.0).
+5. Build the extension VSIX to manually smoke-test the History panel and undo button in a real VS Code session before tagging.
+
+---
+
+## 🚀 Phase 10 — Phase β.0: Actionable History
+**Goal:** Promote History panel + Open Review Panel + status bar from "show what happened" to "resume what's unfinished." Build `reconstructSessionReview` as the keystone primitive every subsequent Revisit feature composes on. Fix the latent FR-B0.7 audit-integrity bug before reconstruction is exposed.
+**Status:** [~] In Progress
+**Estimated Effort:** L
+**Phase Dependencies:** Phase 9 (M9.1, M9.2, M9.3 complete; M9.4/9.5/9.6 may land in parallel but β.0 lands first per architectural decision #1)
+
+---
+
+### 🏁 Milestone 10.1 — β.0 Bridge: Actionable History
+**Status:** [~]
+**Complexity:** L
+**Acceptance Criteria:** All 12 acceptance tests (B0-1..B0-12) green; user-reported "no active session" dead-end unreachable from any of the five scenarios in PHASE-BETA-NEXT.md §6.0.1; existing 234 tests still green.
+**Depends On:** none
+
+#### ✅ Task 10.1.0 — FR-B0.7: emit `undo` events from in-session undo paths
+- **Status:** [x]
+- **Complexity:** M
+- **Depends On:** none
+- **Acceptance Criteria:** Per-hunk ↶ Undo (M9.2.9) and session-level ↶ Undo (Option A) each emit a structurally-valid `UndoEvent` into the history log with the correct scope, target.path, target.hunkIdx (when applicable), and SHA-256 postBlobs covering every affected file. `reconstructSessionReview` (lands in 10.1.3) can rely on `undo` events to anchor reverted state.
+- **Files:** `src/types.ts`, `src/snapshotStore.ts`, `src/history/historyEvents.ts`, `src/history/historyService.ts`, `src/reviewOrchestrator.ts`, `tests/integration/orchestrator.undoAudit.test.ts`
+- **Completed At:** 2026-05-18 02:50
+
+  - [x] Subtask: Relax `UndoEventZ.target.srcEventId` to allow `-1` sentinel
+  - [x] Subtask: Add `lastTurnId` to `SessionData`; retain on `endTurn`
+  - [x] Subtask: `HistoryService.recordUndo(input)` writes post-blobs and emits `undo` event
+  - [x] Subtask: `ReviewOrchestrator.recordUndoEvent` helper with currentTurnId→lastTurnId→sid fallback
+  - [x] Subtask: Wire `handleUndoHunkDecision` to emit scope:'hunk'
+  - [x] Subtask: Wire `handleUndoLastAction` to map `UndoSnapshot.scope` → event scope; carry hunkIdx on hunk-scope
+  - [x] Subtask: Tests B0-11, B0-12 (per-hunk + bulk scopes; SHA-256 verification)
+
+#### ⏳ Task 10.1.1 — Pure types in historyTypes.ts
+- **Status:** [ ]
+- **Complexity:** XS
+
+#### ⏳ Task 10.1.2 — Index gains `hasOpenTurn` + `pendingHunkCount`
+- **Status:** [ ]
+- **Complexity:** S
+
+#### ⏳ Task 10.1.3 — `HistoryService.reconstructSessionReview`
+- **Status:** [ ]
+- **Complexity:** L
+
+#### ⏳ Task 10.1.4 — `ReviewOrchestrator.adoptReconstructed` + round-trip harness
+- **Status:** [ ]
+- **Complexity:** L
+
+#### ⏳ Task 10.1.5 — `getPendingReviewsSummary()` with 1s cache
+- **Status:** [ ]
+- **Complexity:** S
+
+#### ⏳ Task 10.1.9 — Gate `reDiff` through `lockFile`
+- **Status:** [ ]
+- **Complexity:** S
+
+---
+
+### Session 6 — 2026-05-18 02:50 (β.0 sub-task 10.1.0 — FR-B0.7 undo emission)
+**Summary:** Closed the FR-B0.7 audit-integrity gap. Per-hunk Undo (M9.2.9) and session-level Undo (Option A) now emit `undo` events into the history log. Required for `reconstructSessionReview` (10.1.3) to anchor reverted state without replaying stale `hunk-decided` chains. 3 new tests; 234 → 237 green.
+
+**Completed:**
+- [x] **10.1.0** FR-B0.7: emit undo events from in-session undo paths (B0-11, B0-12)
+
+**Files Changed:**
+- `src/history/historyEvents.ts` — `UndoEventZ.target.srcEventId` accepts -1 sentinel for "infer from chronological replay"
+- `src/types.ts` — `SessionData.lastTurnId: string | null` retains the closed turn id across `endTurn`
+- `src/snapshotStore.ts` — `endTurn` sets `lastTurnId = currentTurnId` before clearing; `getOrCreateSession` initialises `lastTurnId: null`
+- `src/history/historyService.ts` — `RecordUndoInput` + `recordUndo(input)`: blob-writes per path, emits `undo` event, fire-and-forget
+- `src/reviewOrchestrator.ts` — `recordUndoEvent` helper (turnId fallback chain); `handleUndoHunkDecision` emits scope:'hunk'; `handleUndoLastAction` maps `UndoSnapshot.scope` → event scope ('hunk'/'file'/'turn'); `UndoSnapshot.hunkIdx` captured at action time
+- `tests/integration/orchestrator.undoAudit.test.ts` — created (3 tests: B0-11 per-hunk, B0-12 file, B0-12 turn)
+
+**Dependencies Added:** none
+
+**Decisions:**
+- D-S6-1: `srcEventId = -1` sentinel rather than threading the originating hunk-decided event id through the orchestrator. The in-session undo doesn't have a recorded srcEventId at emission time, and chronological replay during reconstruction can infer the target unambiguously.
+- D-S6-2: `lastTurnId` on `SessionData` rather than holding a separate "post-Stop turn buffer" elsewhere. Single source of truth + survives across the orchestrator's `endTurn → openReview → user-Undo` lifecycle gap.
+- D-S6-3: Captured `UndoSnapshot.hunkIdx` at action time instead of inferring it from per-hunk status diffs at undo time. Status-diff inference fails when multiple hunks were pending pre-action.
+- D-S6-4: One `undo` event per Undo action (covering all affected files) rather than one per file. Matches the user's mental model (one ↶ click = one audit entry) and minimises blob writes.
+
+**Deviations:** none from the plan
+
+**Tech Debt Introduced:** none
+
+**Next Session Should:**
+1. **10.1.1** — Add `PendingReviewsSummary`, `ReconstructedSessionReview`, `FileDriftStatus` types to `historyTypes.ts` (pure, no Node imports)
+2. **10.1.2** — Extend `SessionIndexEntry` with `hasOpenTurn` + `pendingHunkCount`; maintain in service
+3. **10.1.3** — `HistoryService.reconstructSessionReview` (streaming replay + disk drift classification)
+4. **10.1.4** — `ReviewOrchestrator.adoptReconstructed` + round-trip equivalence harness
+5. **10.1.5** — `getPendingReviewsSummary()` with 1s cache
+6. **10.1.9** — Gate `reDiff` through `lockFile` + race-fixture test
+
