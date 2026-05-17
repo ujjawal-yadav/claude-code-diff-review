@@ -25,6 +25,23 @@ export interface SessionData {
   lastEventAt: number;
   /** Set when the per-session byte/file budget was exhausted. */
   overBudget: boolean;
+  /**
+   * Identifier for the active turn (Phase α Track 1/6 — Memory Design §2).
+   * A "turn" is the window between two `Stop` events. Minted lazily by
+   * `SnapshotStore.beginTurnIfNeeded` on first `PreToolUse` after the last
+   * `Stop`. Reset to null on Stop. Used by the event log to group events
+   * and by future Phase β surfaces (Revisit timeline, Bisect scope).
+   */
+  currentTurnId: string | null;
+  turnStartedAt: number | null;
+  /**
+   * Phase β.0 (FR-B0.7): the most recently closed turn id, retained after
+   * `endTurn` clears `currentTurnId`. Some history events (notably per-hunk
+   * ↶ Undo) fire AFTER Stop has closed the active turn — they still need
+   * a valid turnId to attach the audit record to. Resolution order is
+   * `currentTurnId ?? lastTurnId ?? sessionId` (synthetic fallback).
+   */
+  lastTurnId: string | null;
 }
 
 export interface ConversationEntry {
@@ -121,3 +138,33 @@ export interface SessionReview {
   state: SessionState;
   metrics: SessionMetrics;
 }
+
+// --------------------------------------------------------------------------
+// Set-based reversibility (Phase α Track 6 — see PHASE-ALPHA-IMMEDIATE.md §8)
+// --------------------------------------------------------------------------
+//
+// The file's true state is defined as `originalSnapshot + applied_hunk_set`.
+// Every Accept/Reject is a set-membership update; the file is re-rendered
+// from `originalSnapshot`, NOT patched on top of the previous disk state.
+// This eliminates drift (toggle Accept→Reject→Accept N times → identical
+// bytes each time) and is the foundation for Phase β Investigate primitives
+// (C/D/E/F all depend on B).
+//
+// `acceptedSet` lives host-side only (Sets do not survive structured-clone
+// across the webview postMessage boundary). The webview consumes the
+// derived `HunkReview.status` field instead.
+
+export interface HunkSetState {
+  filePath: AbsPath;
+  /** Captured pre-edit content. The render target — never mutated. */
+  originalSnapshot: string;
+  /** Every hunk Claude produced for this file in this session. Stable order. */
+  allHunks: StructuredHunk[];
+  /** Indices into `allHunks` that are currently considered applied. */
+  acceptedSet: Set<number>;
+}
+
+export type RenderResult =
+  | { ok: true; content: string }
+  | { ok: false; reason: 'set-conflict'; conflictingHunks: number[] }
+  | { ok: false; reason: 'snapshot-binary' };

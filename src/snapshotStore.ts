@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -150,6 +151,50 @@ export class SnapshotStore {
     return sum;
   }
 
+  /**
+   * Returns the current turn id, minting a new one if none is active
+   * (Phase α — PHASE-ALPHA-IMMEDIATE.md §3.4). Called from `PreToolUse`
+   * hook so every edit lands inside a turn. Idempotent within a turn.
+   *
+   * `freshlyMinted` lets the caller emit a `turn-started` event into the
+   * Memory Design log on first edit of a new turn without having to track
+   * turn boundaries themselves.
+   *
+   * Concurrency: writes to a single session are safe because (a) we read
+   * before writing in the same microtask, and (b) the first writer wins
+   * via a `setIfAbsent` pattern. Concurrent PreToolUse calls for the same
+   * session race only on which UUID gets minted; once set, the read path
+   * returns the live value.
+   */
+  beginTurnIfNeeded(sessionId: string, cwd: string): { turnId: string; freshlyMinted: boolean } {
+    const session = this.getOrCreateSession(sessionId as SessionId, cwd);
+    if (session.currentTurnId == null) {
+      session.currentTurnId = crypto.randomUUID();
+      session.turnStartedAt = Date.now();
+      return { turnId: session.currentTurnId, freshlyMinted: true };
+    }
+    return { turnId: session.currentTurnId, freshlyMinted: false };
+  }
+
+  /**
+   * Mark the active turn ended (Phase α — Memory Design boundary). Called
+   * from the Stop handler. Idempotent: subsequent `Stop`s without an
+   * intervening PreToolUse are no-ops.
+   */
+  endTurn(sessionId: string): void {
+    const session = this.sessions.get(sessionId as SessionId);
+    if (!session) return;
+    // Phase β.0 (FR-B0.7): retain the closed turn id so any post-Stop history
+    // emission (e.g., per-hunk Undo fired after the review panel opens) can
+    // still attach to a valid turn. Idempotent: a Stop without an intervening
+    // turn is a no-op (currentTurnId is already null, lastTurnId preserved).
+    if (session.currentTurnId != null) {
+      session.lastTurnId = session.currentTurnId;
+    }
+    session.currentTurnId = null;
+    session.turnStartedAt = null;
+  }
+
   private getOrCreateSession(sessionId: SessionId, cwd: string): SessionData {
     const existing = this.sessions.get(sessionId);
     if (existing) return existing;
@@ -161,6 +206,9 @@ export class SnapshotStore {
       touched: new Set(),
       lastEventAt: Date.now(),
       overBudget: false,
+      currentTurnId: null,
+      turnStartedAt: null,
+      lastTurnId: null,
     };
     this.sessions.set(sessionId, fresh);
     return fresh;

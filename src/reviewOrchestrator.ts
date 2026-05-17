@@ -1,7 +1,9 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { computeDiff, revertHunk } from './diffEngine.js';
+import { computeDiff } from './diffEngine.js';
+import { initialHunkSetState, renderFileFromHunkSet } from './core/hunkSet.js';
+import type { HistoryService } from './history/historyService.js';
 import { Logger } from './logger.js';
 import { SnapshotStore } from './snapshotStore.js';
 import {
@@ -12,6 +14,7 @@ import {
   FileReview,
   FileStatus,
   HunkReview,
+  HunkSetState,
   HunkStatus,
   SessionId,
   SessionMetrics,
@@ -46,6 +49,14 @@ export interface PanelGateway {
   postFileUpdated(filePath: AbsPath, file: FileReview): void;
   postHunkApplied(filePath: AbsPath, hunkIndex: number, status: HunkStatus): void;
   postSessionCompleted(sessionId: SessionId, metrics: SessionMetrics): void;
+  /**
+   * Phase α Track 6: surface a set-conflict from the set-based renderer.
+   * The orchestrator has already reverted the offending set change; the
+   * webview is responsible for the UX (banner + "re-accept coupled hunks").
+   */
+  postSetConflict(filePath: AbsPath, attemptedHunkIndex: number, conflictingHunks: number[]): void;
+  /** Option A: tell the webview the current undo-stack depth (0 ⇒ disable ↶). */
+  postUndoStackDepth(sessionId: SessionId, depth: number): void;
   close(sessionId: SessionId): void;
 }
 
@@ -63,6 +74,19 @@ export interface OrchestratorOptions {
    * Used by the CodeLens provider to refresh gutter widgets.
    */
   onChange?: () => void;
+  /**
+   * Phase α Track 1 — Memory Design event log. When provided, the
+   * orchestrator records turn-started / turn-stopped / hunk-decided /
+   * file-snapshot-reverted events. When absent (e.g. in unit tests),
+   * all set-based behaviour still works; the log is just not written.
+   */
+  history?: HistoryService;
+  /**
+   * Phase α: agent identity stamped on every event in the log. Defaults
+   * to 'claude-code' (the v0.1.0 single-agent assumption). Track 3 will
+   * dispatch on incoming agentId from the adapter layer.
+   */
+  agentId?: 'claude-code' | 'opencode';
 }
 
 export class ReviewOrchestrator {
@@ -95,12 +119,40 @@ export class ReviewOrchestrator {
   private readonly byPath = new Map<SessionId, Map<AbsPath, FileReview>>();
   private readonly globalByPath = new Map<AbsPath, { sessionId: SessionId; file: FileReview }>();
 
+  /**
+   * Set-based reversibility state (Phase α Track 6 — PHASE-ALPHA-IMMEDIATE.md §8).
+   *
+   * Per-(session, file) `HunkSetState` carrying the original snapshot and
+   * the currently-accepted hunk indices. Lives host-side only — Sets do
+   * not survive structured-clone over `postMessage`. The webview consumes
+   * the derived `HunkReview.status` field which the host maintains in
+   * lockstep with `acceptedSet`.
+   *
+   * Replaces the v0.1.0 sequential disk-mutation pipeline: every action
+   * now (a) toggles set membership, (b) re-renders from the snapshot,
+   * (c) writes the rendered bytes, (d) updates `HunkReview.status`. Zero
+   * drift across N toggles of the same hunk.
+   */
+  private readonly hunkSets = new Map<SessionId, Map<AbsPath, HunkSetState>>();
+
+  /**
+   * Option A: per-session undo stack. Every mutating action (hunk decision,
+   * bulk file/session, snapshot-revert, per-hunk undo) pushes a snapshot
+   * BEFORE mutating. `handleUndoLastAction` pops the top and restores
+   * acceptedSet + hunk statuses + on-disk content for every affected file.
+   * Capped to bound memory; oldest entries drop when the cap is reached.
+   */
+  private readonly undoStack = new Map<SessionId, UndoSnapshot[]>();
+  private static readonly UNDO_STACK_CAP = 50;
+
   private readonly write: NonNullable<OrchestratorOptions['writeFile']>;
   private readonly read:  NonNullable<OrchestratorOptions['readFile']>;
+  private readonly agentId: 'claude-code' | 'opencode';
 
   constructor(private readonly opts: OrchestratorOptions) {
     this.write = opts.writeFile ?? defaultWrite;
     this.read  = opts.readFile  ?? defaultRead;
+    this.agentId = opts.agentId ?? 'claude-code';
   }
 
   private notifyChange(): void {
@@ -132,6 +184,10 @@ export class ReviewOrchestrator {
     if (existing) clearTimeout(existing);
     const t = setTimeout(() => {
       this.stopDebounce.delete(sid);
+      // Phase α: close the current turn at the Stop boundary so the next
+      // PreToolUse mints a fresh turnId. Idempotent — Stops without any
+      // intervening edit are no-ops.
+      this.opts.store.endTurn(sid);
       this.openReview(sid, lastAssistantMessage).catch((err) => {
         this.opts.logger.error('orchestrator', 'open.error', { sid, err: String(err) });
       });
@@ -177,12 +233,21 @@ export class ReviewOrchestrator {
       const hunk = file.hunks[hunkIndex];
       if (!hunk || hunk.status !== 'pending') return;
 
-      if (action === 'reject') {
-        const result = await this.applyReject(file, hunk);
-        if (!result.ok) {
-          // Hunk stays pending; warning surfaced inside applyReject.
-          return;
+      // Option A: snapshot for undo BEFORE mutating.
+      const snapshot = this.snapshotForUndo(sid, [file], 'hunk-action', hunkIndex);
+
+      const outcome = await this.applyHunkSetChange(sid, file, (set) => {
+        if (action === 'accept') set.add(hunkIndex);
+        else                     set.delete(hunkIndex);
+      });
+
+      if (!outcome.ok) {
+        if (outcome.reason === 'set-conflict') {
+          this.opts.panel.postSetConflict(absFile, hunkIndex, outcome.conflictingHunks);
         }
+        // hunk stays pending; warnings already attached to file inside applyHunkSetChange
+        this.opts.panel.postFileUpdated(absFile, file);
+        return;
       }
 
       hunk.status = action === 'accept' ? 'accepted' : 'rejected';
@@ -190,8 +255,13 @@ export class ReviewOrchestrator {
       file.status = recomputeFileStatus(file.hunks);
       review.metrics = recomputeMetrics(review.files);
       this.opts.panel.postHunkApplied(absFile, hunkIndex, hunk.status);
+      this.pushUndoSnapshot(sid, snapshot);
       this.notifyChange();
       this.maybeComplete(review);
+
+      // Phase α Track 1: log the decision after the write lands. Best-effort —
+      // history failures never block the user flow (service logs internally).
+      this.recordHunkDecisionEvent(sid, file, hunk.index, hunk.status as 'accepted' | 'rejected', outcome.content);
     });
   }
 
@@ -213,47 +283,143 @@ export class ReviewOrchestrator {
       targetFiles = f ? [f] : [];
     }
 
-    // Different files run under distinct locks ⇒ parallelisable. Same-file
-    // contention queues behind this. We await Promise.all so every file's
-    // disk write completes before we notify and check completion.
-    await Promise.all(targetFiles.map((file) => this.lockFile(file.filePath, async () => {
-      const everyHunkPending = file.hunks.length > 0 && file.hunks.every((h) => h.status === 'pending');
+    // Option A: one snapshot per bulk action (not per file in the batch).
+    // Undoing a bulk action restores every affected file in one step.
+    const bulkSnapshot = targetFiles.length > 0
+      ? this.snapshotForUndo(sid, targetFiles, scope === 'session' ? 'bulk-session' : 'bulk-file')
+      : null;
+    let bulkProducedChanges = false;
 
-      // Fast path: when rejecting EVERY pending hunk in a file, skip
-      // per-hunk reverse-patch (which can drift across hunks) and just
-      // write the captured snapshot directly. Identical end state, more
-      // robust against context drift.
-      if (action === 'reject' && everyHunkPending) {
-        try {
-          await this.write(file.filePath, file.before);
-          file.after = file.before;
-          for (const h of file.hunks) {
-            if (h.status === 'pending') { h.status = 'rejected'; h.decidedAt = Date.now(); }
-          }
-        } catch (err) {
-          this.markWriteFailed(file, err);
-          this.opts.panel.postFileUpdated(file.filePath, file);
-          return;
+    // Different files run under distinct locks ⇒ parallelisable. Same-file
+    // contention queues behind this. Each file does a single set-based
+    // render + write (the legacy "fast path" for full-file rejects is now
+    // the default path for every operation — by construction).
+    await Promise.all(targetFiles.map((file) => this.lockFile(file.filePath, async () => {
+      const pendingIndices = file.hunks
+        .map((h, i) => (h.status === 'pending' ? i : -1))
+        .filter((i) => i >= 0);
+      if (pendingIndices.length === 0) return;
+
+      const outcome = await this.applyHunkSetChange(sid, file, (set) => {
+        if (action === 'accept') {
+          for (const i of pendingIndices) set.add(i);
+        } else {
+          for (const i of pendingIndices) set.delete(i);
         }
-      } else {
-        for (let i = 0; i < file.hunks.length; i++) {
-          const h = file.hunks[i];
-          if (h.status !== 'pending') continue;
-          if (action === 'reject') {
-            const result = await this.applyReject(file, h);
-            if (!result.ok) continue; // stays pending; warning is on the file
-          }
-          h.status = action === 'accept' ? 'accepted' : 'rejected';
-          h.decidedAt = Date.now();
+      });
+
+      if (!outcome.ok) {
+        // Conflict during bulk → keep pending; surface single banner per file.
+        if (outcome.reason === 'set-conflict') {
+          this.opts.panel.postSetConflict(file.filePath, pendingIndices[0], outcome.conflictingHunks);
         }
+        this.opts.panel.postFileUpdated(file.filePath, file);
+        return;
+      }
+
+      const now = Date.now();
+      for (const i of pendingIndices) {
+        const h = file.hunks[i];
+        h.status = action === 'accept' ? 'accepted' : 'rejected';
+        h.decidedAt = now;
       }
       file.status = recomputeFileStatus(file.hunks);
       this.opts.panel.postFileUpdated(file.filePath, file);
+      bulkProducedChanges = true;
+
+      // Phase α Track 1: log each hunk decision in this bulk batch.
+      for (const i of pendingIndices) {
+        const h = file.hunks[i];
+        this.recordHunkDecisionEvent(sid, file, h.index, h.status as 'accepted' | 'rejected', outcome.content);
+      }
     })));
 
     review.metrics = recomputeMetrics(review.files);
+    // Option A: push the bulk snapshot only if the action actually changed
+    // something. Avoids "Undo" entries for no-op bulks (e.g., accept-all
+    // when nothing was pending).
+    if (bulkSnapshot && bulkProducedChanges) {
+      this.pushUndoSnapshot(sid, bulkSnapshot);
+    }
     this.notifyChange();
     this.maybeComplete(review);
+  }
+
+  /**
+   * Phase α M9.2.9: undo the latest decision on a single hunk within the
+   * current panel session. Inverts the hunk's set membership and flips
+   * its status back to `pending`. Goes through the same per-file mutex
+   * as the original decision so concurrent clicks serialise.
+   *
+   * Cross-turn / cross-session undo (rebase semantics from MEMORY-DESIGN
+   * §5) is Phase β Revisit and gated behind `history.crossTurnUndo`.
+   */
+  async handleUndoHunkDecision(sessionId: string, filePath: string, hunkIndex: number): Promise<void> {
+    const sid = asSessionId(sessionId);
+    const review = this.sessions.get(sid);
+    if (!review) {
+      this.opts.logger.warn('orchestrator', 'undo.no-session', { sid });
+      return;
+    }
+    const absFile = asAbsPath(filePath);
+    const file = this.getFile(sid, absFile);
+    if (!file) {
+      this.opts.logger.warn('orchestrator', 'undo.no-file', { sid, filePath });
+      return;
+    }
+
+    await this.lockFile(absFile, async () => {
+      const hunk = file.hunks[hunkIndex];
+      if (!hunk) return;
+      // Already pending? No-op.
+      if (hunk.status === 'pending') return;
+
+      // Option A: snapshot for undo so "undo of undo" works.
+      const snapshot = this.snapshotForUndo(sid, [file], 'undo-hunk', hunkIndex);
+
+      const wasAccepted = hunk.status === 'accepted';
+      // Inverse-toggle: if accepted → remove from set; if rejected → add back.
+      const outcome = await this.applyHunkSetChange(sid, file, (set) => {
+        if (wasAccepted) set.delete(hunkIndex);
+        else             set.add(hunkIndex);
+      });
+
+      if (!outcome.ok) {
+        // Best-effort: surface conflict if any (rare for undo since the
+        // prior decision was rendered cleanly), then leave status as-is.
+        if (outcome.reason === 'set-conflict') {
+          this.opts.panel.postSetConflict(absFile, hunkIndex, outcome.conflictingHunks);
+        }
+        this.opts.panel.postFileUpdated(absFile, file);
+        return;
+      }
+
+      hunk.status = 'pending';
+      delete hunk.decidedAt;
+      file.status = recomputeFileStatus(file.hunks);
+      review.metrics = recomputeMetrics(review.files);
+      this.opts.panel.postHunkApplied(absFile, hunkIndex, hunk.status);
+      this.pushUndoSnapshot(sid, snapshot);
+      this.notifyChange();
+
+      // Phase β.0 (FR-B0.7): emit `undo` event so `reconstructSessionReview`
+      // observes the reverted-to state instead of replaying the now-undone
+      // hunk-decided event. Resolves turnId via lastTurnId fallback (Stop
+      // has already fired by the time per-hunk Undo is reachable).
+      const sessionData = this.opts.store.get(sid);
+      const srcTurnId = sessionData?.currentTurnId ?? sessionData?.lastTurnId ?? sid;
+      this.recordUndoEvent(
+        sid,
+        'hunk',
+        { srcTurnId, srcEventId: -1, path: file.relPath, hunkIdx: hunkIndex },
+        new Map([[absFile, outcome.content]]),
+        () => file.relPath,
+      );
+
+      this.opts.logger.info('orchestrator', 'hunk.undone', {
+        sid, file: absFile, hunk: hunkIndex, previousStatus: wasAccepted ? 'accepted' : 'rejected',
+      });
+    });
   }
 
   dismissSession(sessionId: string): void {
@@ -261,6 +427,8 @@ export class ReviewOrchestrator {
     this.opts.panel.close(sid);
     this.sessions.delete(sid);
     this.unindexSession(sid);
+    this.unindexHunkSets(sid);
+    this.undoStack.delete(sid);
     this.opts.store.release(sid);
     this.opts.logger.info('orchestrator', 'session.dismissed', { sid });
     this.notifyChange();
@@ -283,27 +451,40 @@ export class ReviewOrchestrator {
     if (!file) return;
 
     await this.lockFile(absFile, async () => {
-      try {
-        await this.write(absFile, file.before);
-      } catch (err) {
-        this.markWriteFailed(file, err);
+      // Option A: snapshot before the revert so user can undo it.
+      const snapshot = this.snapshotForUndo(sid, [file], 'snapshot-revert');
+
+      // Phase α: route through the set pipeline so the `acceptedSet` stays
+      // in sync with disk. Empty set ⇒ render returns the snapshot
+      // unconditionally (no fuzz involved) — same end state as the legacy
+      // direct `writeFile(file.before)` path, but with consistent state.
+      const outcome = await this.applyHunkSetChange(sid, file, (set) => set.clear());
+      if (!outcome.ok) {
+        // Write failed → leave hunks untouched (caller can retry; matches
+        // v0.1.0 invariant that decisions only flip on successful disk write).
+        // `applyHunkSetChange` already added the appropriate warning.
         this.opts.panel.postFileUpdated(absFile, file);
         return;
       }
-      file.after = file.before;
+
+      const now = Date.now();
       for (const h of file.hunks) {
-        if (h.status === 'pending') {
-          h.status = 'rejected';
-          h.decidedAt = Date.now();
-        }
+        // Every hunk becomes rejected (whether previously pending, accepted,
+        // or already rejected — full-file revert is a terminal decision).
+        h.status = 'rejected';
+        if (h.decidedAt == null) h.decidedAt = now;
       }
       file.status = recomputeFileStatus(file.hunks);
-      file.warnings = file.warnings.filter((w) => w !== 'fuzz-failed-revert' && w !== 'write-failed' && w !== 'read-failed');
       review.metrics = recomputeMetrics(review.files);
       this.opts.panel.postFileUpdated(absFile, file);
+      this.pushUndoSnapshot(sid, snapshot);
       this.opts.logger.info('orchestrator', 'file.snapshot-reverted', { file: absFile });
       this.notifyChange();
       this.maybeComplete(review);
+
+      // Phase α Track 1: log the snapshot revert as a distinct event so
+      // History panel can render it as its own action (not just N rejects).
+      void this.recordSnapshotRevertEvent(sid, file, outcome.content);
     });
   }
 
@@ -390,6 +571,16 @@ export class ReviewOrchestrator {
         }
       }
       const diff = computeDiff(absPath, before, after);
+      // Phase α regression guard: a touched file with no actual content
+      // change (Claude wrote identical bytes, or an Edit was a no-op)
+      // should NOT appear in the review. Without this filter, the panel
+      // shows phantom "No changes." files with disabled ✓ File buttons
+      // and silent ✗ File clicks. New / deleted / binary files are kept
+      // regardless — those have meaningful content to surface.
+      if (diff.hunks.length === 0 && !diff.isNew && !diff.isDeleted && !diff.isBinary) {
+        this.opts.logger.debug('orchestrator', 'open.skip-no-changes', { absPath });
+        continue;
+      }
       files.push(toFileReview(diff, sessionData.cwd, sessionData.overBudget));
     }
 
@@ -405,6 +596,11 @@ export class ReviewOrchestrator {
     };
     this.sessions.set(sid, review);
     this.indexFiles(sid, files);
+    // Phase α Track 6: seed initial set state — `acceptedSet = all hunks`
+    // so `renderFileFromHunkSet` produces current disk content byte-for-byte.
+    // No user-visible behaviour change vs v0.1.0; every subsequent
+    // Accept/Reject is a set toggle from this baseline.
+    this.indexHunkSets(sid, files, sessionData.originals);
     await this.opts.panel.openOrFocus(review);
     this.opts.logger.info('orchestrator', 'review.opened', {
       sid,
@@ -412,40 +608,405 @@ export class ReviewOrchestrator {
       hunks: review.metrics.totalHunks,
     });
     this.notifyChange();
+
+    // Phase α Track 1: emit `turn-stopped` into the event log. We have
+    // every file's full diff (hunks + before/after content) right here,
+    // so this single record captures the whole turn for crash recovery
+    // and the History panel. Fire-and-forget; never block the user flow.
+    void this.recordTurnStoppedEvent(sid, review, sessionData.cwd, lastAssistantMessage);
   }
 
-  private async applyReject(file: FileReview, hunk: HunkReview): Promise<{ ok: true } | { ok: false; reason: 'fuzz' | 'fs' }> {
-    let current: string;
-    try {
-      current = await this.read(file.filePath);
-    } catch (err) {
-      file.warnings = uniqueWarnings([...file.warnings, 'read-failed']);
-      this.opts.panel.postFileUpdated(file.filePath, file);
-      this.opts.logger.error('orchestrator', 'reject.read-failed', { file: file.filePath, err: String(err) });
+  /**
+   * Phase α Track 6: the core write primitive for the set-based pipeline.
+   *
+   * Snapshots the current `acceptedSet`, applies `mutate` to it, re-renders
+   * the file from the original snapshot, writes the rendered bytes to disk.
+   * On any failure (render conflict, FS error), the set mutation is rolled
+   * back so `acceptedSet` and disk stay in sync.
+   *
+   * Returns the rendered content on success (caller may use it to update
+   * `file.after`) or a tagged failure for the caller to surface.
+   */
+  private async applyHunkSetChange(
+    sid: SessionId,
+    file: FileReview,
+    mutate: (set: Set<number>) => void,
+  ): Promise<
+    | { ok: true; content: string }
+    | { ok: false; reason: 'set-conflict'; conflictingHunks: number[] }
+    | { ok: false; reason: 'snapshot-binary' }
+    | { ok: false; reason: 'fs' }
+  > {
+    const hunkSet = this.getHunkSet(sid, file.filePath);
+    if (!hunkSet) {
+      this.opts.logger.warn('orchestrator', 'applyHunkSetChange.no-state', { sid, file: file.filePath });
       return { ok: false, reason: 'fs' };
     }
 
-    const result = revertHunk(current, hunkAsStructured(hunk));
+    const previousSet = new Set(hunkSet.acceptedSet);
+    mutate(hunkSet.acceptedSet);
+
+    // No-op short-circuit: if the set didn't actually change (e.g. accepting
+    // a hunk that's already in the initial-all-accepted set), skip render
+    // and write. Preserves the v0.1.0 behaviour that accept-on-applied is
+    // a free no-op on disk.
+    if (setsEqual(previousSet, hunkSet.acceptedSet)) {
+      return { ok: true, content: file.after };
+    }
+
+    const result = renderFileFromHunkSet(hunkSet);
     if (!result.ok) {
-      file.warnings = uniqueWarnings([...file.warnings, 'fuzz-failed-revert']);
-      this.opts.panel.postFileUpdated(file.filePath, file);
-      this.opts.logger.warn('orchestrator', 'reject.fuzz-fail', { file: file.filePath, hunk: hunk.index });
-      return { ok: false, reason: 'fuzz' };
+      hunkSet.acceptedSet = previousSet;
+      if (result.reason === 'set-conflict') {
+        file.warnings = uniqueWarnings([...file.warnings, 'fuzz-failed-revert']);
+        this.opts.logger.warn('orchestrator', 'set.conflict', {
+          file: file.filePath,
+          conflicting: result.conflictingHunks,
+        });
+        return { ok: false, reason: 'set-conflict', conflictingHunks: result.conflictingHunks };
+      }
+      this.opts.logger.warn('orchestrator', 'set.binary', { file: file.filePath });
+      return { ok: false, reason: 'snapshot-binary' };
     }
 
     try {
-      await this.write(file.filePath, result.newContent);
+      await this.write(file.filePath, result.content);
     } catch (err) {
+      hunkSet.acceptedSet = previousSet;
       this.markWriteFailed(file, err);
-      this.opts.panel.postFileUpdated(file.filePath, file);
       return { ok: false, reason: 'fs' };
     }
-    file.after = result.newContent;
+
+    file.after = result.content;
     // Successful write clears any prior FS-failure warning so the banner disappears.
-    if (file.warnings.includes('write-failed') || file.warnings.includes('read-failed')) {
-      file.warnings = file.warnings.filter((w) => w !== 'write-failed' && w !== 'read-failed');
+    if (file.warnings.includes('write-failed') || file.warnings.includes('read-failed') || file.warnings.includes('fuzz-failed-revert')) {
+      file.warnings = file.warnings.filter((w) => w !== 'write-failed' && w !== 'read-failed' && w !== 'fuzz-failed-revert');
     }
-    return { ok: true };
+    return { ok: true, content: result.content };
+  }
+
+  private getHunkSet(sid: SessionId, absPath: AbsPath): HunkSetState | undefined {
+    return this.hunkSets.get(sid)?.get(absPath);
+  }
+
+  /**
+   * Phase α Track 1: persist a hunk decision in the event log.
+   * No-ops cleanly when history isn't configured (tests, --history=off).
+   */
+  private recordHunkDecisionEvent(
+    sid: SessionId,
+    file: FileReview,
+    hunkIdx: number,
+    decision: 'accepted' | 'rejected',
+    postContent: string,
+  ): void {
+    const history = this.opts.history;
+    if (!history) return;
+    const sessionData = this.opts.store.get(sid);
+    const turnId = sessionData?.currentTurnId;
+    if (!turnId) return;
+    void history.recordHunkDecided({
+      sessionId: sid,
+      turnId,
+      agentId: this.agentId,
+      relPath: file.relPath,
+      hunkIdx,
+      decision,
+      postContent,
+      drift: { fuzz: null },
+    });
+  }
+
+  /**
+   * Phase β.0 (FR-B0.7): emit an `undo` event for an in-session undo path.
+   *
+   * Resolves the turnId in fallback order `currentTurnId → lastTurnId → sid`.
+   * The fallback to `lastTurnId` is critical for per-hunk ↶ Undo: that path
+   * fires AFTER Stop (the review panel is already open), at which point
+   * `endTurn` has cleared `currentTurnId`. Without `lastTurnId` the event
+   * would attach to a synthetic session-id "turn" and lose its lineage.
+   *
+   * Fire-and-forget — matches every other `record*Event` helper.
+   */
+  private recordUndoEvent(
+    sid: SessionId,
+    scope: 'hunk' | 'file' | 'turn',
+    target: {
+      srcTurnId: string;
+      srcEventId: number;
+      path?: string;
+      hunkIdx?: number;
+    },
+    postContents: Map<AbsPath, string>,
+    relPathByAbs: (abs: AbsPath) => string,
+  ): void {
+    const history = this.opts.history;
+    if (!history) return;
+    const sessionData = this.opts.store.get(sid);
+    const turnId =
+      sessionData?.currentTurnId
+      ?? sessionData?.lastTurnId
+      ?? sid;
+    const postRecord: Record<string, string> = {};
+    for (const [abs, content] of postContents) {
+      postRecord[relPathByAbs(abs)] = content;
+    }
+    const targetClean: { srcTurnId: string; srcEventId: number; path?: string; hunkIdx?: number } = {
+      srcTurnId: target.srcTurnId,
+      srcEventId: target.srcEventId,
+    };
+    if (target.path !== undefined)    targetClean.path    = target.path;
+    if (target.hunkIdx !== undefined) targetClean.hunkIdx = target.hunkIdx;
+    void history.recordUndo({
+      sessionId: sid,
+      turnId,
+      agentId: this.agentId,
+      scope,
+      target: targetClean,
+      postContents: postRecord,
+    });
+  }
+
+  private recordSnapshotRevertEvent(sid: SessionId, file: FileReview, postContent: string): void {
+    const history = this.opts.history;
+    if (!history) return;
+    const sessionData = this.opts.store.get(sid);
+    const turnId = sessionData?.currentTurnId;
+    if (!turnId) return;
+    void history.recordFileSnapshotReverted({
+      sessionId: sid,
+      turnId,
+      agentId: this.agentId,
+      relPath: file.relPath,
+      postContent,
+    });
+  }
+
+  private async recordTurnStoppedEvent(
+    sid: SessionId,
+    review: SessionReview,
+    cwd: string,
+    lastAssistantMessage: string | null,
+  ): Promise<void> {
+    const history = this.opts.history;
+    if (!history) return;
+    const sessionData = this.opts.store.get(sid);
+    // Use the active turn id if still live; some Stops arrive after `endTurn`
+    // (handleStop calls endTurn before openReview). Fall back to a synthetic
+    // turn id derived from the session to keep the event well-formed.
+    const turnId = sessionData?.currentTurnId ?? sessionData?.sessionId ?? sid;
+    try {
+      await history.recordTurnStopped({
+        sessionId: sid,
+        turnId,
+        agentId: this.agentId,
+        lastAssistantMessage,
+        files: review.files.map((f) => ({
+          relPath: f.relPath,
+          afterContent: f.isBinary ? null : f.after,
+          isNew: f.isNew,
+          isDeleted: f.isDeleted,
+          isBinary: f.isBinary,
+          hunks: f.hunks.map((h) => ({
+            idx: h.index,
+            oldStart: h.oldStart,
+            oldLines: h.oldLines,
+            newStart: h.newStart,
+            newLines: h.newLines,
+            lines: h.lines,
+          })),
+        })),
+      });
+    } catch (err) {
+      this.opts.logger.warn('orchestrator', 'history.turnStopped.failed', { err: String(err) });
+    }
+    // The unused cwd reference keeps the helper's signature stable for
+    // future use (path resolution will need it when we surface absolute
+    // paths in history queries).
+    void cwd;
+  }
+
+  private indexHunkSets(sid: SessionId, files: FileReview[], originals: Map<AbsPath, string>): void {
+    const perSession = new Map<AbsPath, HunkSetState>();
+    for (const file of files) {
+      const before = originals.get(file.filePath) ?? file.before;
+      const allHunks: StructuredHunk[] = file.hunks.map(hunkAsStructured);
+      perSession.set(file.filePath, initialHunkSetState(file.filePath, before, allHunks));
+    }
+    this.hunkSets.set(sid, perSession);
+  }
+
+  private unindexHunkSets(sid: SessionId): void {
+    this.hunkSets.delete(sid);
+  }
+
+  /**
+   * Option A: capture every affected file's state BEFORE a mutating action,
+   * so `handleUndoLastAction` can restore set + statuses + disk verbatim.
+   */
+  private snapshotForUndo(
+    sid: SessionId,
+    affected: FileReview[],
+    scope: UndoSnapshot['scope'],
+    hunkIdx?: number,
+  ): UndoSnapshot {
+    const files = new Map<AbsPath, UndoSnapshotFile>();
+    for (const file of affected) {
+      const hunkSet = this.getHunkSet(sid, file.filePath);
+      files.set(file.filePath, {
+        acceptedSet: new Set(hunkSet?.acceptedSet ?? []),
+        hunkStatuses: file.hunks.map((h) => {
+          const entry: { index: number; status: HunkStatus; decidedAt?: number } = {
+            index: h.index,
+            status: h.status,
+          };
+          if (h.decidedAt !== undefined) entry.decidedAt = h.decidedAt;
+          return entry;
+        }),
+        after: file.after,
+        warnings: [...file.warnings],
+      });
+    }
+    const snap: UndoSnapshot = { scope, files };
+    if (hunkIdx !== undefined) snap.hunkIdx = hunkIdx;
+    return snap;
+  }
+
+  private pushUndoSnapshot(sid: SessionId, snapshot: UndoSnapshot): void {
+    let stack = this.undoStack.get(sid);
+    if (!stack) { stack = []; this.undoStack.set(sid, stack); }
+    stack.push(snapshot);
+    if (stack.length > ReviewOrchestrator.UNDO_STACK_CAP) stack.shift();
+    this.opts.panel.postUndoStackDepth(sid, stack.length);
+  }
+
+  private emitUndoStackDepth(sid: SessionId): void {
+    this.opts.panel.postUndoStackDepth(sid, this.undoStack.get(sid)?.length ?? 0);
+  }
+
+  /**
+   * Option A entry point: pop the most recent action snapshot and restore
+   * every affected file. Editor-style Ctrl+Z semantics:
+   *   - bulk accept-all → undo → all hunks back to pending, no disk change
+   *     (since accept-all is no-op on disk when all hunks were already in set)
+   *   - bulk reject-all → undo → all hunks re-applied, disk restored
+   *   - single hunk → undo → that hunk re-applies, status reverts
+   *   - revert-to-snapshot → undo → all pre-revert content restored
+   *
+   * Goes through `lockFile` per affected file so concurrent UI clicks
+   * serialise.
+   */
+  async handleUndoLastAction(sessionId: string): Promise<void> {
+    const sid = asSessionId(sessionId);
+    const stack = this.undoStack.get(sid);
+    if (!stack || stack.length === 0) {
+      this.opts.logger.debug('orchestrator', 'undo-last.empty-stack', { sid });
+      return;
+    }
+    const review = this.sessions.get(sid);
+    if (!review) {
+      this.opts.logger.warn('orchestrator', 'undo-last.no-session', { sid });
+      return;
+    }
+    const snapshot = stack.pop()!;
+
+    // Phase β.0 (FR-B0.7): accumulate per-file post-undo contents so we can
+    // emit a single `undo` event after all per-file restores complete.
+    // Path keyed by absolute path (matches lockFile granularity) — we'll
+    // translate to relPath at emit time using `file.relPath`.
+    const undoPostContents = new Map<AbsPath, string>();
+    const undoRelPaths = new Map<AbsPath, string>();
+
+    for (const [absFile, fileSnap] of snapshot.files) {
+      await this.lockFile(absFile, async () => {
+        const file = this.getFile(sid, absFile);
+        const hunkSet = this.getHunkSet(sid, absFile);
+        if (!file || !hunkSet) return;
+
+        // Restore set first so any future read sees a consistent state.
+        hunkSet.acceptedSet = new Set(fileSnap.acceptedSet);
+
+        // Only write to disk if the content actually differs — avoids
+        // spurious writes when the action was a no-op-on-disk (e.g.,
+        // accept-all from initial-all-applied state).
+        if (file.after !== fileSnap.after) {
+          try {
+            await this.write(absFile, fileSnap.after);
+          } catch (err) {
+            // Restore failed: push the snapshot back so the user can retry,
+            // and don't corrupt the in-memory state.
+            stack.push(snapshot);
+            this.markWriteFailed(file, err);
+            this.opts.panel.postFileUpdated(absFile, file);
+            this.opts.panel.postUndoStackDepth(sid, stack.length);
+            return;
+          }
+          file.after = fileSnap.after;
+        }
+
+        // Restore hunk statuses + decidedAt.
+        const byIndex = new Map(fileSnap.hunkStatuses.map((h) => [h.index, h]));
+        for (const h of file.hunks) {
+          const prev = byIndex.get(h.index);
+          if (!prev) continue;
+          h.status = prev.status;
+          if (prev.decidedAt !== undefined) h.decidedAt = prev.decidedAt;
+          else delete h.decidedAt;
+        }
+        file.status = recomputeFileStatus(file.hunks);
+        // Restore warnings exactly so transient banners revert too.
+        file.warnings = [...fileSnap.warnings];
+        this.opts.panel.postFileUpdated(absFile, file);
+
+        // Phase β.0 (FR-B0.7): capture content for audit emission.
+        undoPostContents.set(absFile, file.after);
+        undoRelPaths.set(absFile, file.relPath);
+      });
+    }
+
+    review.metrics = recomputeMetrics(review.files);
+    this.notifyChange();
+    this.emitUndoStackDepth(sid);
+
+    // Phase β.0 (FR-B0.7): emit one undo event after the restore lands.
+    // Skip when nothing changed on disk (no postContents → no audit value).
+    if (undoPostContents.size > 0) {
+      const undoScope: 'hunk' | 'file' | 'turn' =
+        (snapshot.scope === 'hunk-action' || snapshot.scope === 'undo-hunk') ? 'hunk' :
+        (snapshot.scope === 'bulk-file' || snapshot.scope === 'snapshot-revert') ? 'file' :
+        'turn';
+      const sessionData = this.opts.store.get(sid);
+      const srcTurnId = sessionData?.currentTurnId ?? sessionData?.lastTurnId ?? sid;
+      const target: { srcTurnId: string; srcEventId: number; path?: string; hunkIdx?: number } = {
+        srcTurnId,
+        srcEventId: -1,
+      };
+      if (undoScope === 'hunk') {
+        // Single-file, single-hunk scope. `snapshot.hunkIdx` was captured at
+        // snapshot creation time (handleHunkAction / handleUndoHunkDecision).
+        const [absFile] = undoPostContents.keys();
+        const relPath = undoRelPaths.get(absFile);
+        if (relPath !== undefined)        target.path    = relPath;
+        if (snapshot.hunkIdx !== undefined) target.hunkIdx = snapshot.hunkIdx;
+      } else if (undoScope === 'file') {
+        // Single-file revert.
+        const [absFile] = undoPostContents.keys();
+        const relPath = undoRelPaths.get(absFile);
+        if (relPath !== undefined) target.path = relPath;
+      }
+      // For 'turn' scope (bulk-session), omit path/hunkIdx — multiple files.
+      this.recordUndoEvent(
+        sid,
+        undoScope,
+        target,
+        undoPostContents,
+        (abs) => undoRelPaths.get(abs) ?? abs,
+      );
+    }
+
+    this.opts.logger.info('orchestrator', 'undo-last.applied', {
+      sid, scope: snapshot.scope, files: snapshot.files.size, remaining: stack.length,
+    });
   }
 
   private markWriteFailed(file: FileReview, err: unknown): void {
@@ -484,6 +1045,28 @@ export class ReviewOrchestrator {
     ]);
     Object.assign(file, refreshed);
     file.status = recomputeFileStatus(file.hunks);
+
+    // Phase α Track 6: rebuild HunkSetState from the refreshed hunks so the
+    // set stays consistent with the new hunk indices. `acceptedSet` is
+    // derived from preserved hunk.status. New hunks (no prior alignment)
+    // arrive as 'pending' and start outside the set.
+    const newAllHunks: StructuredHunk[] = file.hunks.map(hunkAsStructured);
+    const newAccepted = new Set<number>();
+    for (const h of file.hunks) {
+      if (h.status === 'accepted') newAccepted.add(h.index);
+    }
+    let perSession = this.hunkSets.get(sid);
+    if (!perSession) {
+      perSession = new Map();
+      this.hunkSets.set(sid, perSession);
+    }
+    perSession.set(absPath, {
+      filePath: absPath,
+      originalSnapshot: file.before,
+      allHunks: newAllHunks,
+      acceptedSet: newAccepted,
+    });
+
     this.opts.panel.postFileUpdated(absPath, file);
     this.notifyChange();
   }
@@ -598,6 +1181,39 @@ function hunksAlignedShallow(a: HunkReview, b: HunkReview): boolean {
 
 function uniqueWarnings<T extends string>(arr: T[]): T[] {
   return Array.from(new Set(arr));
+}
+
+// --------------------------------------------------------------------------
+// Option A: undo-stack snapshot types
+// --------------------------------------------------------------------------
+
+interface UndoSnapshotFile {
+  acceptedSet: Set<number>;
+  hunkStatuses: Array<{ index: number; status: HunkStatus; decidedAt?: number }>;
+  /** On-disk content immediately before the mutation. */
+  after: string;
+  /** File-level warnings before the mutation (so banners revert too). */
+  warnings: FileReview['warnings'];
+}
+
+interface UndoSnapshot {
+  scope: 'hunk-action' | 'bulk-file' | 'bulk-session' | 'snapshot-revert' | 'undo-hunk';
+  /** Affected files keyed by absolute path. */
+  files: Map<AbsPath, UndoSnapshotFile>;
+  /**
+   * Phase β.0 (FR-B0.7): the specific hunk index toggled by the originating
+   * action — populated only when `scope === 'hunk-action' | 'undo-hunk'`.
+   * Used to attach `target.hunkIdx` on the emitted `undo` event so
+   * `reconstructSessionReview` can pinpoint the reverted hunk without
+   * inferring it from per-hunk status diffs.
+   */
+  hunkIdx?: number;
+}
+
+function setsEqual(a: Set<number>, b: Set<number>): boolean {
+  if (a.size !== b.size) return false;
+  for (const v of a) if (!b.has(v)) return false;
+  return true;
 }
 
 /** Exported for unit tests. */
