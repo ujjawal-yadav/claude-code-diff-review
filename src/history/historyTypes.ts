@@ -18,6 +18,21 @@ export interface SessionIndexEntry {
   lastMessage: string | null;
   /** Total turns observed so far. */
   turnCount: number;
+  /**
+   * Phase β.0 (10.1.2): true when the most recent turn-started has no
+   * matching turn-stopped or turn-aborted. Maintained by HistoryService
+   * write paths so findResumeCandidates / getPendingReviewsSummary do not
+   * have to scan every session's events on every call.
+   */
+  hasOpenTurn?: boolean;
+  /**
+   * Phase β.0 (10.1.2): cached count of hunks in the most recent turn-stopped
+   * that have NOT yet been decided (hunk-decided or undone-to-pending).
+   * Lazy-computed on first read; null ⇒ "not computed yet, recompute on next
+   * read." Reset to null on every turn-stopped / hunk-decided / undo event so
+   * the cache stays correct without active invalidation everywhere.
+   */
+  pendingHunkCount?: number | null;
 }
 
 export interface HistoryIndex {

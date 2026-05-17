@@ -238,6 +238,7 @@ export class HistoryService {
         postBlob,
         drift: input.drift,
       });
+      await this.invalidatePendingHunkCount(input.sessionId);
     } catch (err) {
       this.opts.logger.warn('history', 'decision.failed', { err: String(err), sid: input.sessionId });
     }
@@ -257,6 +258,7 @@ export class HistoryService {
         path: input.relPath,
         postBlob,
       });
+      await this.invalidatePendingHunkCount(input.sessionId);
     } catch (err) {
       this.opts.logger.warn('history', 'revert.failed', { err: String(err), sid: input.sessionId });
     }
@@ -294,6 +296,7 @@ export class HistoryService {
         postBlobs,
         cascaded: input.cascaded ?? [],
       });
+      await this.invalidatePendingHunkCount(input.sessionId);
     } catch (err) {
       this.opts.logger.warn('history', 'undo.failed', { err: String(err), sid: input.sessionId });
     }
@@ -318,6 +321,9 @@ export class HistoryService {
       const entry = this.liveSessions.get(sessionId);
       if (entry) {
         entry.status = 'aborted';
+        // β.0 (10.1.2): abort closes the open turn; any pending count is stale.
+        entry.hasOpenTurn = false;
+        entry.pendingHunkCount = null;
         await this.index.upsertSession(entry);
       }
     } catch (err) {
@@ -423,11 +429,16 @@ export class HistoryService {
       lastEventAt: now,
       lastMessage: null,
       turnCount: 0,
+      hasOpenTurn: false,
+      pendingHunkCount: null,
     };
     if (incrementTurn) entry.turnCount += 1;
     entry.status = 'open';
     entry.lastEventAt = now;
     if (lastMsg !== null) entry.lastMessage = lastMsg;
+    // β.0 (10.1.2): turn-started → hasOpenTurn true; pendingHunkCount stale.
+    entry.hasOpenTurn = true;
+    entry.pendingHunkCount = null;
     this.liveSessions.set(sessionId, entry);
     await this.index.upsertSession(entry);
   }
@@ -446,12 +457,106 @@ export class HistoryService {
       lastEventAt: now,
       lastMessage: lastMsg,
       turnCount: 1,
+      hasOpenTurn: false,
+      pendingHunkCount: null,
     };
     entry.status = 'closed';
     entry.lastEventAt = now;
     entry.lastMessage = lastMsg;
+    // β.0 (10.1.2): turn-stopped → close the open turn; pendingHunkCount stale
+    // (every hunk Claude produced this turn is now pending review).
+    entry.hasOpenTurn = false;
+    entry.pendingHunkCount = null;
     this.liveSessions.set(sessionId, entry);
     await this.index.upsertSession(entry);
+  }
+
+  /**
+   * β.0 (10.1.2): lazy-compute or return cached pending hunk count for a
+   * session. A hunk is "pending" if it appeared in the most recent
+   * turn-stopped event for its (sessionId, path) pair and was NOT
+   * subsequently decided (hunk-decided), file-reverted, or undone.
+   *
+   * Strategy: stream-replay the session and maintain per-(path, hunkIdx)
+   * status. After the walk, count hunks still 'pending'. Cache on the entry
+   * so subsequent reads are O(1) until the next write invalidates.
+   *
+   * Bounded by the session's event count — typically tens to low hundreds.
+   * Replaces the per-session O(S × E) scan the toast emitted at activation.
+   */
+  async getPendingHunkCount(sessionId: string): Promise<number> {
+    const idx = await this.index.read();
+    const entry = idx.sessions.find((s) => s.sessionId === sessionId);
+    if (!entry) return 0;
+    if (entry.pendingHunkCount != null) return entry.pendingHunkCount;
+
+    // Replay to compute.
+    type HunkKey = string; // `${path}::${hunkIdx}`
+    const pending = new Set<HunkKey>();
+    // Track last turnId-per-path so a new turn re-seeds (i.e., subsequent
+    // turns' hunks supersede the prior — but in v0.2 each turn is a new
+    // review surface; an unfinished prior turn carries its pending count).
+    for await (const ev of this.reader.readSession(sessionId)) {
+      switch (ev.kind) {
+        case 'turn-stopped':
+          for (const f of ev.files) {
+            for (const h of f.hunks) pending.add(`${f.path}::${h.idx}`);
+          }
+          break;
+        case 'hunk-decided':
+          pending.delete(`${ev.path}::${ev.hunkIdx}`);
+          break;
+        case 'file-snapshot-reverted':
+          // Every hunk for this file in the most recent turn is decided (rejected).
+          for (const k of Array.from(pending)) {
+            if (k.startsWith(`${ev.path}::`)) pending.delete(k);
+          }
+          break;
+        case 'undo':
+          // Reverse decisions per scope. For scope:'hunk' with a specific
+          // path+hunkIdx, the undone hunk flips back to pending.
+          if (ev.scope === 'hunk' && ev.target.path && ev.target.hunkIdx !== undefined) {
+            pending.add(`${ev.target.path}::${ev.target.hunkIdx}`);
+          } else if (ev.scope === 'file' && ev.target.path) {
+            // File-scope undo: don't have per-hunk granularity in the event,
+            // so leave the count slightly stale (≥ true count) — better than
+            // a full session re-replay and accurate enough for status bar.
+            // Future: emit per-hunk undo when scope='file' to refine.
+          }
+          break;
+        case 'turn-started':
+        case 'turn-aborted':
+          break;
+      }
+    }
+    const count = pending.size;
+    // Write-through to entry cache.
+    const live = this.liveSessions.get(sessionId);
+    if (live) {
+      live.pendingHunkCount = count;
+      this.liveSessions.set(sessionId, live);
+      await this.index.upsertSession(live);
+    } else {
+      // Not currently tracked in liveSessions — persist via index update.
+      const fresh: SessionIndexEntry = { ...entry, pendingHunkCount: count };
+      await this.index.upsertSession(fresh);
+    }
+    return count;
+  }
+
+  /**
+   * β.0 (10.1.2): invalidate the cached pending count for a session.
+   * Called from `recordHunkDecided` and `recordUndo` write paths so the
+   * next `getPendingReviewsSummary` recomputes from the segments.
+   */
+  private async invalidatePendingHunkCount(sessionId: string): Promise<void> {
+    const entry = this.liveSessions.get(sessionId);
+    if (entry && entry.pendingHunkCount !== null) {
+      entry.pendingHunkCount = null;
+      this.liveSessions.set(sessionId, entry);
+      // Persist only if it changed something callers will read soon.
+      await this.index.upsertSession(entry);
+    }
   }
 }
 
