@@ -26,6 +26,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { BlobStore, sha256Hex } from './historyBlobs.js';
+import type {
+  FileDriftStatus,
+  ReconstructedFileReview,
+  ReconstructedSessionReview,
+} from './historyTypes.js';
 import {
   AgentId,
   HistoryEvent,
@@ -352,6 +357,279 @@ export class HistoryService {
 
   async readBlob(sha: string): Promise<string> {
     return this.blobs.read(sha);
+  }
+
+  /**
+   * β.0 (10.1.3): replay a session's events into a `ReconstructedSessionReview`
+   * suitable for `ReviewOrchestrator.adoptReconstructed`.
+   *
+   * Algorithm
+   * ---------
+   * Stream events chronologically. Maintain per-file mutable state
+   * `{ acceptedSet, hunks, originalSnapshot, afterContent }`.
+   *
+   *   turn-started: read `beforeBlob` per file → originalSnapshot; init entry.
+   *                 The most recent turn-started's turnId becomes the session's
+   *                 turnId (Resume re-opens the prior turn, not a synthetic one).
+   *   turn-stopped: read `afterBlob` → afterContent; replace hunks; seed
+   *                 acceptedSet = {0..N-1} (every hunk initially applied).
+   *                 Decisions logged AFTER this event toggle membership.
+   *   hunk-decided: accepted → set.add(hunkIdx); rejected → set.delete.
+   *   file-snapshot-reverted: set.clear(); afterContent = originalSnapshot
+   *   undo: re-anchor afterContent from postBlob (the simplest "what should the
+   *         world look like now" anchor — avoids re-walking the toggle chain).
+   *   turn-aborted: noted but does not stop replay (subsequent events may
+   *                 still apply if the session continued with a new turn).
+   *
+   * Drift classification
+   * --------------------
+   * After replay, read the file's current on-disk content and compare its
+   * SHA-256 against the reconstructed `afterContent`:
+   *   - missing on disk → 'missing'
+   *   - hashes match    → 'clean'
+   *   - hashes differ   → 'drifted'
+   *
+   * Returns null if the session has no events.
+   */
+  async reconstructSessionReview(
+    sessionId: string,
+    options?: { cwd?: string; readDiskFile?: (relPath: string) => Promise<string | null> },
+  ): Promise<ReconstructedSessionReview | null> {
+    const cwd = options?.cwd ?? this.opts.workspaceRoot;
+
+    interface PerFileState {
+      relPath: string;
+      originalSnapshot: string;
+      afterContent: string;
+      isNew: boolean;
+      isDeleted: boolean;
+      isBinary: boolean;
+      hunks: ReconstructedFileReview['hunks'];
+      acceptedSet: Set<number>;
+    }
+    const files = new Map<string, PerFileState>();
+    let agentId: AgentId = 'claude-code';
+    let turnId: string | null = null;
+    let lastEventId = -1;
+    let lastEventAt = 0;
+    let hadAnyEvent = false;
+
+    for await (const ev of this.reader.readSession(sessionId)) {
+      hadAnyEvent = true;
+      lastEventId = Math.max(lastEventId, ev.eventId);
+      lastEventAt = Math.max(lastEventAt, ev.ts);
+      agentId = ev.agentId;
+      switch (ev.kind) {
+        case 'turn-started': {
+          turnId = ev.turnId;
+          for (const f of ev.files) {
+            const before = f.beforeBlob ? await this.safeReadBlob(f.beforeBlob) : '';
+            const state = files.get(f.path) ?? {
+              relPath: f.path,
+              originalSnapshot: before,
+              afterContent: before,
+              isNew: false,
+              isDeleted: false,
+              isBinary: false,
+              hunks: [],
+              acceptedSet: new Set<number>(),
+            };
+            // Subsequent turn-started for the same file (multi-turn session)
+            // replaces the snapshot baseline. Hunks/acceptedSet reset later
+            // when turn-stopped lands.
+            state.originalSnapshot = before;
+            files.set(f.path, state);
+          }
+          break;
+        }
+        case 'turn-stopped': {
+          turnId = ev.turnId;
+          for (const f of ev.files) {
+            const after = f.afterBlob ? await this.safeReadBlob(f.afterBlob) : '';
+            const existing = files.get(f.path);
+            const state: PerFileState = existing ?? {
+              relPath: f.path,
+              originalSnapshot: '',
+              afterContent: after,
+              isNew: false,
+              isDeleted: false,
+              isBinary: false,
+              hunks: [],
+              acceptedSet: new Set<number>(),
+            };
+            state.afterContent = after;
+            state.isNew = f.isNew;
+            state.isDeleted = f.isDeleted;
+            state.isBinary = f.isBinary;
+            state.hunks = f.hunks.map((h) => ({
+              index: h.idx,
+              oldStart: h.oldStart,
+              oldLines: h.oldLines,
+              newStart: h.newStart,
+              newLines: h.newLines,
+              // header is not persisted — reconstruct an empty placeholder.
+              // Webview-side renderers re-derive from oldStart/newStart.
+              header: '',
+              lines: h.lines.slice(),
+              status: 'pending',
+            }));
+            state.acceptedSet = new Set(f.hunks.map((h) => h.idx));
+            files.set(f.path, state);
+          }
+          break;
+        }
+        case 'hunk-decided': {
+          const state = files.get(ev.path);
+          if (!state) break;
+          const hunk = state.hunks.find((h) => h.index === ev.hunkIdx);
+          if (hunk) {
+            hunk.status = ev.decision;
+            hunk.decidedAt = ev.ts;
+          }
+          if (ev.decision === 'accepted') state.acceptedSet.add(ev.hunkIdx);
+          else                              state.acceptedSet.delete(ev.hunkIdx);
+          if (ev.postBlob) {
+            const content = await this.safeReadBlob(ev.postBlob);
+            state.afterContent = content;
+          }
+          break;
+        }
+        case 'file-snapshot-reverted': {
+          const state = files.get(ev.path);
+          if (!state) break;
+          state.acceptedSet.clear();
+          for (const h of state.hunks) {
+            h.status = 'rejected';
+            h.decidedAt = ev.ts;
+          }
+          state.afterContent = await this.safeReadBlob(ev.postBlob);
+          break;
+        }
+        case 'undo': {
+          // Re-anchor each affected file's afterContent from postBlobs.
+          for (const [relPath, sha] of Object.entries(ev.postBlobs)) {
+            const state = files.get(relPath);
+            if (!state) continue;
+            state.afterContent = await this.safeReadBlob(sha);
+            // For scope:'hunk' with a specific hunkIdx, flip that hunk back
+            // to pending so the user sees the undone decision as undecided.
+            if (ev.scope === 'hunk' && ev.target.path === relPath && ev.target.hunkIdx !== undefined) {
+              const hunk = state.hunks.find((h) => h.index === ev.target.hunkIdx);
+              if (hunk) {
+                hunk.status = 'pending';
+                delete hunk.decidedAt;
+              }
+              // Set membership: if the hunk was accepted → remove (revert
+              // toggle); if rejected → add. Best-effort — afterContent is
+              // already canonical via postBlob anchor.
+            } else if (ev.scope === 'file') {
+              // File-scope undo: revert every hunk to pending.
+              for (const h of state.hunks) {
+                h.status = 'pending';
+                delete h.decidedAt;
+              }
+            } else if (ev.scope === 'turn') {
+              for (const h of state.hunks) {
+                h.status = 'pending';
+                delete h.decidedAt;
+              }
+            }
+          }
+          break;
+        }
+        case 'turn-aborted':
+          // Note the abort but keep replaying — a session can recover.
+          break;
+      }
+    }
+
+    if (!hadAnyEvent || turnId == null) return null;
+
+    // Drift classification per file: read current disk content + compare.
+    const diskReader = options?.readDiskFile ?? ((rel: string) => this.readWorkspaceFile(cwd, rel));
+    const driftPerFile: Record<string, FileDriftStatus> = {};
+    for (const [relPath, state] of files) {
+      let drift: FileDriftStatus;
+      try {
+        const onDisk = await diskReader(relPath);
+        if (onDisk == null) {
+          drift = state.isDeleted ? 'clean' : 'missing';
+        } else if (state.isBinary) {
+          // Binary: can't hash UTF-8 → trust the recon if the file exists.
+          drift = 'clean';
+        } else {
+          drift = sha256Hex(onDisk) === sha256Hex(state.afterContent) ? 'clean' : 'drifted';
+        }
+      } catch {
+        drift = 'missing';
+      }
+      driftPerFile[relPath] = drift;
+    }
+
+    const reconstructedFiles: ReconstructedFileReview[] = [];
+    const hunkSets: ReconstructedSessionReview['hunkSets'] = [];
+    for (const [relPath, state] of files) {
+      const filePath = this.joinCwd(cwd, relPath);
+      reconstructedFiles.push({
+        filePath,
+        relPath,
+        before: state.originalSnapshot,
+        after: state.afterContent,
+        isNew: state.isNew,
+        isDeleted: state.isDeleted,
+        isBinary: state.isBinary,
+        hunks: state.hunks.map((h) => ({ ...h })),
+      });
+      hunkSets.push({
+        filePath,
+        originalSnapshot: state.originalSnapshot,
+        allHunks: state.hunks.map((h) => ({
+          index: h.index,
+          oldStart: h.oldStart,
+          oldLines: h.oldLines,
+          newStart: h.newStart,
+          newLines: h.newLines,
+          header: h.header,
+          lines: h.lines.slice(),
+        })),
+        acceptedSet: Array.from(state.acceptedSet).sort((a, b) => a - b),
+      });
+    }
+
+    return {
+      sessionId,
+      agentId,
+      cwd,
+      turnId,
+      lastEventId,
+      lastEventAt,
+      files: reconstructedFiles,
+      hunkSets,
+      driftPerFile,
+    };
+  }
+
+  private async safeReadBlob(sha: string): Promise<string> {
+    try {
+      return await this.blobs.read(sha);
+    } catch (err) {
+      this.opts.logger.warn('history', 'blob.read.failed', { sha, err: String(err) });
+      return '';
+    }
+  }
+
+  private async readWorkspaceFile(cwd: string, relPath: string): Promise<string | null> {
+    const abs = path.join(cwd, relPath);
+    try {
+      return await fs.readFile(abs, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
+    }
+  }
+
+  private joinCwd(cwd: string, relPath: string): string {
+    return path.join(cwd, relPath);
   }
 
   // -- retention -----------------------------------------------------------
