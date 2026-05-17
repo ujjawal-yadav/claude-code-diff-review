@@ -14,7 +14,17 @@ export type AbsPath   = Brand<string, 'AbsPath'>;
 export const asSessionId = (s: string): SessionId => s as SessionId;
 export const asAbsPath   = (s: string): AbsPath   => s as AbsPath;
 
+/**
+ * Identifier for the coding agent that produced a session. Forward-
+ * declared here to keep `SessionData` / `SessionReview` agnostic to
+ * adapter wiring. Concrete adapter implementations live under
+ * `src/adapters/`. (M9.4a — multi-agent groundwork.)
+ */
+export type AgentId = 'claude-code' | 'opencode';
+
 export interface SessionData {
+  /** Which adapter produced the events for this session. */
+  agentId: AgentId;
   sessionId: SessionId;
   cwd: string;
   startedAt: number;
@@ -112,6 +122,8 @@ export interface FileReview {
 }
 
 export interface SessionReview {
+  /** Which adapter produced this session. (M9.4a.) */
+  agentId: AgentId;
   sessionId: SessionId;
   cwd: string;
   startedAt: number;

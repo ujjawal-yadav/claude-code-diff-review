@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import type { SessionId, AbsPath, SessionData } from './types.js';
+import type { AgentId, SessionId, AbsPath, SessionData } from './types.js';
 import { asAbsPath } from './types.js';
 
 /**
@@ -60,11 +60,12 @@ export class SnapshotStore {
     sessionId: string,
     cwd: string,
     rawPath: string,
+    agentId: AgentId = 'claude-code',
   ): Promise<AbsPath | null> {
     const resolved = resolveSafe(cwd, rawPath);
     if (resolved == null) return null;
 
-    const session = this.getOrCreateSession(sessionId as SessionId, cwd);
+    const session = this.getOrCreateSession(sessionId as SessionId, cwd, agentId);
     const lockKey = `${session.sessionId}::${resolved}`;
 
     const prior = this.locks.get(lockKey) ?? Promise.resolve();
@@ -123,10 +124,15 @@ export class SnapshotStore {
   /**
    * Mark a file as touched in this session. No I/O.
    */
-  recordTouched(sessionId: string, cwd: string, rawPath: string): AbsPath | null {
+  recordTouched(
+    sessionId: string,
+    cwd: string,
+    rawPath: string,
+    agentId: AgentId = 'claude-code',
+  ): AbsPath | null {
     const resolved = resolveSafe(cwd, rawPath);
     if (resolved == null) return null;
-    const session = this.getOrCreateSession(sessionId as SessionId, cwd);
+    const session = this.getOrCreateSession(sessionId as SessionId, cwd, agentId);
     session.touched.add(resolved);
     session.lastEventAt = Date.now();
     return resolved;
@@ -150,10 +156,11 @@ export class SnapshotStore {
     return sum;
   }
 
-  private getOrCreateSession(sessionId: SessionId, cwd: string): SessionData {
+  private getOrCreateSession(sessionId: SessionId, cwd: string, agentId: AgentId): SessionData {
     const existing = this.sessions.get(sessionId);
     if (existing) return existing;
     const fresh: SessionData = {
+      agentId,
       sessionId,
       cwd,
       startedAt: Date.now(),

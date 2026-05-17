@@ -394,6 +394,7 @@ export class ReviewOrchestrator {
     }
 
     const review: SessionReview = {
+      agentId: sessionData.agentId,
       sessionId: sid,
       cwd: sessionData.cwd,
       startedAt: sessionData.startedAt,
