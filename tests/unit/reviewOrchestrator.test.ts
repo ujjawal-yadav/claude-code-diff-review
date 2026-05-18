@@ -18,6 +18,7 @@ class FakePanel implements PanelGateway {
   opened: SessionReview[] = [];
   fileUpdates: Array<{ filePath: AbsPath; file: FileReview }> = [];
   hunkApplied: Array<{ filePath: AbsPath; hunkIndex: number; status: HunkStatus }> = [];
+  setConflicts: Array<{ filePath: AbsPath; attemptedHunkIndex: number; conflictingHunks: number[] }> = [];
   completed: Array<{ sessionId: SessionId; metrics: SessionMetrics }> = [];
   closed: SessionId[] = [];
 
@@ -26,6 +27,11 @@ class FakePanel implements PanelGateway {
   postHunkApplied(filePath: AbsPath, hunkIndex: number, status: HunkStatus) {
     this.hunkApplied.push({ filePath, hunkIndex, status });
   }
+  postSetConflict(filePath: AbsPath, attemptedHunkIndex: number, conflictingHunks: number[]) {
+    this.setConflicts.push({ filePath, attemptedHunkIndex, conflictingHunks });
+  }
+  undoDepths: number[] = [];
+  postUndoStackDepth(_sid: SessionId, depth: number) { this.undoDepths.push(depth); }
   postSessionCompleted(sessionId: SessionId, metrics: SessionMetrics) { this.completed.push({ sessionId, metrics }); }
   close(sessionId: SessionId) { this.closed.push(sessionId); }
 }

@@ -1,9 +1,10 @@
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 
 /**
- * `.claude/settings.json` manager (TRD §5.3).
+ * `.claude/settings.json` manager (TRD §5.3 + Phase α Track 2).
  *
  * Identity invariant
  * ------------------
@@ -13,6 +14,19 @@ import * as crypto from 'node:crypto';
  *
  * Entries WITHOUT the marker are user-owned and MUST NEVER be modified or
  * deleted. Merge and removal both filter on this marker.
+ *
+ * Install scope (Phase α)
+ * ------------------------
+ * `installScope` selects between:
+ *   - 'user'      → `~/.claude/settings.json` (default; every project picks
+ *                   up the hooks automatically — biggest activation lift)
+ *   - 'workspace' → `<workspace>/.claude/settings.json` (opt-in; per-project)
+ *
+ * The marker key is identical across scopes, so a workspace-level install
+ * and a user-level install can coexist (the user just sees their hooks
+ * configured twice for that workspace). The orchestrator activation does
+ * collision detection and warns if both scopes carry our marker — workspace
+ * wins as the more specific config.
  *
  * Atomicity
  * ---------
@@ -48,15 +62,28 @@ interface SettingsRoot {
   [k: string]: unknown;
 }
 
+export type InstallScope = 'user' | 'workspace';
+
 export interface HookConfigOptions {
-  /** Workspace root where `.claude/settings.json` lives. */
-  workspaceRoot: string;
+  /** Workspace root (used for `workspace` scope; ignored for `user` scope). */
+  workspaceRoot: string | null;
   /** Bound port of the loopback server. */
   port: number;
+  /** Install scope (Phase α Track 2). */
+  scope: InstallScope;
+}
+
+export interface RemoveHooksOptions {
+  workspaceRoot: string | null;
+  scope: InstallScope;
 }
 
 export async function ensureHooksInstalled(opts: HookConfigOptions): Promise<void> {
-  const { settingsPath, dir } = pathsFor(opts.workspaceRoot);
+  const resolved = resolveInstallPath(opts.scope, opts.workspaceRoot);
+  if (!resolved) {
+    throw new Error('cannot resolve install path: workspace scope requested but no workspace folder is open');
+  }
+  const { settingsPath, dir } = resolved;
 
   await fs.mkdir(dir, { recursive: true });
 
@@ -84,8 +111,10 @@ export async function ensureHooksInstalled(opts: HookConfigOptions): Promise<voi
   await atomicWrite(settingsPath, JSON.stringify(root, null, 2) + '\n');
 }
 
-export async function removeHooks(opts: { workspaceRoot: string }): Promise<void> {
-  const { settingsPath } = pathsFor(opts.workspaceRoot);
+export async function removeHooks(opts: RemoveHooksOptions): Promise<void> {
+  const resolved = resolveInstallPath(opts.scope, opts.workspaceRoot);
+  if (!resolved) return; // nothing to remove if path can't be resolved
+  const { settingsPath } = resolved;
 
   let raw: string;
   try {
@@ -114,14 +143,54 @@ export async function removeHooks(opts: { workspaceRoot: string }): Promise<void
   await atomicWrite(settingsPath, JSON.stringify(root, null, 2) + '\n');
 }
 
-// --------------------------------------------------------------------------
-// Internals
-// --------------------------------------------------------------------------
+/**
+ * Returns true if `<scope>/.claude/settings.json` currently contains any
+ * hook entry tagged with our marker. Used by activation to detect
+ * collisions across scopes and the v0.1.0→v0.2.0 migration prompt.
+ */
+export async function hasInstalledHooks(opts: RemoveHooksOptions): Promise<boolean> {
+  const resolved = resolveInstallPath(opts.scope, opts.workspaceRoot);
+  if (!resolved) return false;
+  let raw: string;
+  try {
+    raw = await fs.readFile(resolved.settingsPath, 'utf8');
+  } catch (err) {
+    if (isNoEnt(err)) return false;
+    throw err;
+  }
+  let root: SettingsRoot;
+  try { root = parseStrict(raw); } catch { return false; }
+  if (!root.hooks) return false;
+  for (const arr of Object.values(root.hooks)) {
+    if (!arr) continue;
+    if (arr.some((e) => e?.[HOOK_MARKER_KEY] === HOOK_MARKER_VALUE)) return true;
+  }
+  return false;
+}
 
-function pathsFor(workspaceRoot: string): { dir: string; settingsPath: string } {
+/**
+ * Resolves the `.claude/settings.json` path for the given scope. Returns
+ * null when scope='workspace' but no workspace root was provided.
+ *
+ * - `user` scope:      `~/.claude/settings.json` (resolved via `os.homedir`)
+ * - `workspace` scope: `<workspaceRoot>/.claude/settings.json`
+ */
+export function resolveInstallPath(
+  scope: InstallScope,
+  workspaceRoot: string | null,
+): { dir: string; settingsPath: string } | null {
+  if (scope === 'user') {
+    const dir = path.join(os.homedir(), '.claude');
+    return { dir, settingsPath: path.join(dir, 'settings.json') };
+  }
+  if (!workspaceRoot) return null;
   const dir = path.join(workspaceRoot, '.claude');
   return { dir, settingsPath: path.join(dir, 'settings.json') };
 }
+
+// --------------------------------------------------------------------------
+// Internals
+// --------------------------------------------------------------------------
 
 function parseStrict(raw: string): SettingsRoot {
   try {

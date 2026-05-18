@@ -4,6 +4,10 @@ import { send } from '../vscode';
 import { HunkBlock } from './HunkBlock';
 import styles from '../styles/DiffPane.module.css';
 
+function allDecided(file: FileReview): boolean {
+  return file.hunks.length > 0 && file.hunks.every((h) => h.status !== 'pending');
+}
+
 interface Props {
   file: FileReview;
 }
@@ -111,24 +115,33 @@ function FileHeader({ file, expanded, onToggle }: { file: FileReview; expanded: 
         </span>
       </button>
       <div className={styles.fileActions}>
-        <button
-          type="button"
-          className={styles.btn}
-          disabled={file.status === 'accepted'}
-          onClick={() => send({ type: 'accept-file', filePath: file.filePath })}
-          aria-label="Accept all hunks in this file"
-        >
-          ✓ File
-        </button>
-        <button
-          type="button"
-          className={styles.btn}
-          disabled={file.status === 'rejected'}
-          onClick={() => send({ type: 'reject-file', filePath: file.filePath })}
-          aria-label="Reject all hunks in this file"
-        >
-          ✗ File
-        </button>
+        {/* Bug B fix: when a file has no hunks (binary file, or a touched-but-unchanged
+            edge case that slipped through openReview's filter), the bulk-action
+            buttons would silently no-op. Hide them entirely to remove the affordance. */}
+        {file.hunks.length > 0 && (
+          <>
+            <button
+              type="button"
+              className={styles.btn}
+              disabled={file.status === 'accepted' || allDecided(file)}
+              onClick={() => send({ type: 'accept-file', filePath: file.filePath })}
+              aria-label="Accept all hunks in this file"
+              title={allDecided(file) ? 'Every hunk in this file has already been decided' : 'Accept every pending hunk in this file'}
+            >
+              ✓ File
+            </button>
+            <button
+              type="button"
+              className={styles.btn}
+              disabled={file.status === 'rejected' || allDecided(file)}
+              onClick={() => send({ type: 'reject-file', filePath: file.filePath })}
+              aria-label="Reject all hunks in this file"
+              title={allDecided(file) ? 'Every hunk in this file has already been decided' : 'Reject every pending hunk in this file (writes snapshot)'}
+            >
+              ✗ File
+            </button>
+          </>
+        )}
       </div>
     </header>
   );

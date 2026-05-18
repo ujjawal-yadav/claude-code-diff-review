@@ -2,7 +2,9 @@ import * as vscode from 'vscode';
 
 import { Logger, LogLevel } from './logger.js';
 import { SecretManager } from './secretManager.js';
-import { ensureHooksInstalled, removeHooks as removeHookConfig } from './hookConfigurator.js';
+import { ensureHooksInstalled, hasInstalledHooks, removeHooks as removeHookConfig, InstallScope } from './hookConfigurator.js';
+import { HistoryService } from './history/historyService.js';
+import { HistoryPanelManager } from './historyPanel.js';
 import { startServer, ServerHandle } from './server.js';
 import { SnapshotStore } from './snapshotStore.js';
 import { ReviewOrchestrator } from './reviewOrchestrator.js';
@@ -98,9 +100,68 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return codeLens;
   };
 
+  // Phase α Track 1: construct the Memory Design event-log service. Lazy —
+  // workspace-rooted construction requires a folder; when none is open we
+  // skip history but everything else still works.
+  let history: HistoryService | undefined;
+  let historyPanel: HistoryPanelManager | undefined;
+  const earlyRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (earlyRoot) {
+    const earlyScope = (config.get<string>('installScope') ?? 'user') as InstallScope;
+    history = new HistoryService({
+      scope: earlyScope,
+      workspaceRoot: earlyRoot,
+      logger,
+      enabled: (config.get<boolean>('history.enabled') ?? true),
+    });
+    logger.info('extension', 'history.ready', { root: history.getRoot() });
+
+    // M9.2.10: retention sweeper. 10-minute interval, off the hot path.
+    const retentionDays = config.get<number>('history.retentionDays') ?? 30;
+    const sweepIntervalMs = 10 * 60 * 1000;
+    const sweepTimer = setInterval(() => {
+      void history!.sweep(retentionDays).then((res) => {
+        if (res.sessions > 0 || res.blobs > 0) {
+          logger?.info('history', 'sweep', { ...res, retentionDays });
+        }
+      }).catch((err) => logger?.warn('history', 'sweep.error', { err: String(err) }));
+    }, sweepIntervalMs);
+    context.subscriptions.push({ dispose: () => clearInterval(sweepTimer) });
+
+    // M9.2.11: crash recovery. On activation, if any session in the log has
+    // an open turn within the last 7 days, surface a "Resume review" toast.
+    // Fire-and-forget; never blocks activation.
+    void history.findResumeCandidates({ withinMs: 7 * 24 * 60 * 60 * 1000 })
+      .then(async (candidates) => {
+        const openOnes = candidates.filter((c) => c.hasOpenTurn);
+        if (openOnes.length === 0) return;
+        const choice = await vscode.window.showInformationMessage(
+          `Claude Code Review: ${openOnes.length} session(s) ended without a clean stop. Open the History panel to inspect?`,
+          'Open History',
+          'Dismiss',
+        );
+        if (choice === 'Open History') {
+          await vscode.commands.executeCommand('claudeReview.openHistory').then(undefined, () => undefined);
+        }
+      })
+      .catch((err) => logger?.warn('history', 'recovery.probe.error', { err: String(err) }));
+
+    // M9.2.12: one-time `.gitignore` prompt. On first event-log write we
+    // detect a workspace `.gitignore` and offer to add the history path.
+    // Persists decision in workspaceState so we don't re-prompt.
+    const GITIGNORE_ASKED = 'claudeReview.gitignoreAsked';
+    if (earlyScope === 'workspace' && context.workspaceState.get<boolean>(GITIGNORE_ASKED) !== true) {
+      void maybePromptGitignore(earlyRoot, logger).then(async (didPrompt) => {
+        if (didPrompt) await context.workspaceState.update(GITIGNORE_ASKED, true);
+      }).catch((err) => logger?.warn('history', 'gitignore.prompt.error', { err: String(err) }));
+    }
+  }
+
   const orchestrator = new ReviewOrchestrator({
     store, panel, logger,
     onChange: () => codeLens?.refresh(),
+    ...(history ? { history } : {}),
+    agentId: 'claude-code',
   });
   panel.setOrchestrator(orchestrator);
 
@@ -124,9 +185,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push({ dispose: () => scm?.dispose() });
 
   const onPreToolUse = async (p: PreToolUsePayload) => {
+    // Phase α Track 6 + Track 1: mint a turn id if this is the first edit of
+    // a new turn, capture the before-snapshot, and emit `turn-started` into
+    // the event log on freshly-minted turns. All best-effort.
+    const turnInfo = store.beginTurnIfNeeded(p.session_id, p.cwd);
     const resolved = await store.captureOriginal(p.session_id, p.cwd, p.tool_input.file_path);
     if (resolved == null) {
       logger?.warn('hooks', 'pre.path-rejected', { sid: p.session_id, raw: p.tool_input.file_path });
+      return;
+    }
+    if (turnInfo.freshlyMinted && history) {
+      const before = store.get(p.session_id)?.originals.get(resolved) ?? null;
+      void history.recordTurnStarted({
+        sessionId: p.session_id,
+        turnId: turnInfo.turnId,
+        agentId: 'claude-code',
+        files: [{
+          relPath: relPathFromCwd(p.cwd, resolved),
+          beforeContent: before,
+          mtimeMs: null,
+        }],
+      });
     }
   };
   const onPostToolUse = async (p: PostToolUsePayload) => {
@@ -164,18 +243,69 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Deferred off the activation hot path. The hook config file only needs
   // to exist before the user runs `claude` — not before activate() returns.
   // Pushing this out shaves ~2 s from cold start (TRD §15 budget: <200 ms P95).
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (root) {
-    void ensureHooksInstalled({ workspaceRoot: root, port: server.port })
-      .then(() => logger?.info('extension', 'hooks.installed', { port: server!.port }))
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
+  const installScope = (config.get<string>('installScope') ?? 'user') as InstallScope;
+
+  // Phase α Track 2: collision detection. If both scopes carry our marker,
+  // prefer workspace (more specific) and warn the user.
+  void hasInstalledHooks({ workspaceRoot: root, scope: 'workspace' }).then(async (workspaceHasOurs) => {
+    const userHasOurs = await hasInstalledHooks({ workspaceRoot: root, scope: 'user' });
+    if (workspaceHasOurs && userHasOurs && installScope === 'user') {
+      logger?.warn('extension', 'install.collision', {
+        msg: 'Claude Review hooks found at both user and workspace scope. The workspace-level install will fire (more specific). Remove the redundant copy via "Switch Install Scope".',
+      });
+      void vscode.window.showWarningMessage(
+        'Claude Code Review: hooks are installed at BOTH user and workspace scope. The workspace install takes precedence — remove the duplicate via "Switch Install Scope".',
+      );
+    }
+  }).catch(() => { /* swallow probe errors */ });
+
+  // Phase α Track 2: v0.1.0 → v0.2.0 migration prompt. If the user is on
+  // the new 'user' default but has workspace-level hooks from a prior
+  // install, offer to migrate. One-shot — persists the answer regardless.
+  const MIGRATION_FLAG = 'claudeReview.migrationV1Asked';
+  if (installScope === 'user' && context.globalState.get<boolean>(MIGRATION_FLAG) !== true && root) {
+    void hasInstalledHooks({ workspaceRoot: root, scope: 'workspace' }).then(async (hasWorkspaceHooks) => {
+      if (!hasWorkspaceHooks) {
+        // Nothing to migrate; quietly persist so we don't ask again.
+        await context.globalState.update(MIGRATION_FLAG, true);
+        return;
+      }
+      const choice = await vscode.window.showInformationMessage(
+        'Claude Code Review v0.2 installs hooks at user scope (~/.claude/) by default so every project picks them up. Migrate your existing workspace-level hooks now?',
+        { modal: false },
+        'Migrate to user scope',
+        'Stay on workspace scope',
+        'Decide later',
+      );
+      if (choice === 'Migrate to user scope') {
+        try {
+          await removeHookConfig({ workspaceRoot: root, scope: 'workspace' });
+          await ensureHooksInstalled({ workspaceRoot: root, port: server!.port, scope: 'user' });
+          void vscode.window.showInformationMessage('Claude Review: hooks migrated to ~/.claude/settings.json.');
+          await context.globalState.update(MIGRATION_FLAG, true);
+        } catch (err) {
+          void vscode.window.showErrorMessage(`Migration failed: ${(err as Error).message}`);
+        }
+      } else if (choice === 'Stay on workspace scope') {
+        await config.update('installScope', 'workspace', vscode.ConfigurationTarget.Workspace);
+        await context.globalState.update(MIGRATION_FLAG, true);
+      }
+      // 'Decide later' or dismissed → leave the flag false; we'll ask again next activation.
+    }).catch((err) => logger?.warn('extension', 'migration.probe.failed', { err: String(err) }));
+  }
+
+  if (installScope === 'workspace' && !root) {
+    logger.warn('extension', 'no-workspace', { msg: 'workspace install scope but no folder open; hooks not installed' });
+  } else {
+    void ensureHooksInstalled({ workspaceRoot: root, port: server.port, scope: installScope })
+      .then(() => logger?.info('extension', 'hooks.installed', { port: server!.port, scope: installScope }))
       .catch((err) => {
-        logger?.error('extension', 'hooks.install.failed', { err: String(err) });
+        logger?.error('extension', 'hooks.install.failed', { err: String(err), scope: installScope });
         void vscode.window.showErrorMessage(
-          'Claude Code Review: failed to write .claude/settings.json. Open the file and check permissions.',
+          `Claude Code Review: failed to write ${installScope === 'user' ? '~/.claude/settings.json' : '<workspace>/.claude/settings.json'}. Check permissions.`,
         );
       });
-  } else {
-    logger.warn('extension', 'no-workspace', { msg: 'no workspace folder open; hooks not installed' });
   }
 
   // Re-diff on save (TRD §9.3 + §15: debounced 200 ms in orchestrator).
@@ -192,13 +322,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.commands.registerCommand('claudeReview.removeHooks', async () => {
-      const r = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      if (!r) { vscode.window.showWarningMessage('No workspace folder is open.'); return; }
+      const r = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
+      const scope = (config.get<string>('installScope') ?? 'user') as InstallScope;
       try {
-        await removeHookConfig({ workspaceRoot: r });
-        vscode.window.showInformationMessage('Claude Code Review hooks removed.');
+        // Remove from BOTH scopes so the user gets a complete clean.
+        // No-ops harmlessly if the file or marked entries don't exist.
+        await removeHookConfig({ workspaceRoot: r, scope: 'user' });
+        await removeHookConfig({ workspaceRoot: r, scope: 'workspace' });
+        vscode.window.showInformationMessage(`Claude Code Review hooks removed (active scope was ${scope}).`);
       } catch (err) {
         vscode.window.showErrorMessage(`Failed to remove hooks: ${(err as Error).message}`);
+      }
+    }),
+    vscode.commands.registerCommand('claudeReview.switchInstallScope', async () => {
+      const r = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
+      const currentScope = (config.get<string>('installScope') ?? 'user') as InstallScope;
+      const nextScope: InstallScope = currentScope === 'user' ? 'workspace' : 'user';
+      if (nextScope === 'workspace' && !r) {
+        vscode.window.showWarningMessage('Cannot switch to workspace scope: no workspace folder is open.');
+        return;
+      }
+      try {
+        await removeHookConfig({ workspaceRoot: r, scope: currentScope });
+        await ensureHooksInstalled({ workspaceRoot: r, port: server!.port, scope: nextScope });
+        const target = nextScope === 'workspace'
+          ? vscode.ConfigurationTarget.Workspace
+          : vscode.ConfigurationTarget.Global;
+        await config.update('installScope', nextScope, target);
+        vscode.window.showInformationMessage(
+          `Claude Review: hooks switched to ${nextScope} scope (${nextScope === 'user' ? '~/.claude/' : '<workspace>/.claude/'}).`,
+        );
+      } catch (err) {
+        vscode.window.showErrorMessage(`Switch scope failed: ${(err as Error).message}`);
       }
     }),
     vscode.commands.registerCommand('claudeReview.rotateBearerToken', async () => {
@@ -258,6 +413,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       vscode.window.showInformationMessage(`Claude Review chat is using: ${label}.`);
     }),
     vscode.commands.registerCommand('claudeReview.showLog', () => logger?.show()),
+    vscode.commands.registerCommand('claudeReview.openHistory', async () => {
+      if (!history) {
+        vscode.window.showInformationMessage(
+          'Claude Code Review: history is unavailable (no workspace folder open).',
+        );
+        return;
+      }
+      if (!historyPanel) {
+        historyPanel = new HistoryPanelManager({ context, logger: logger!, history });
+      }
+      await historyPanel.openOrFocus();
+    }),
     vscode.commands.registerCommand('claudeReview.openPanel', () => {
       const sids = activeSessionIds(orchestrator);
       if (sids.length === 0) {
@@ -286,6 +453,60 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 function activeSessionIds(orchestrator: ReviewOrchestrator): string[] {
   return orchestrator.listSessionIds();
+}
+
+/**
+ * Best-effort relative-path helper for history records. Forward-slashes
+ * the result and falls back to the absolute path when it doesn't fit
+ * under `cwd`. Defensive — never throws.
+ */
+function relPathFromCwd(cwd: string, absPath: string): string {
+  try {
+    const rel = require('node:path').relative(cwd, absPath);
+    if (!rel || rel.startsWith('..')) return absPath;
+    return rel.replace(/\\/g, '/');
+  } catch {
+    return absPath;
+  }
+}
+
+/**
+ * M9.2.12: prompt the user (once per workspace) to add `.claude/review-history/`
+ * to their `.gitignore`. Returns true if the prompt was shown (regardless
+ * of the user's answer) so the caller can persist a suppression flag.
+ *
+ * Only fires for workspace-scope installs — user-scope event logs live
+ * outside the project tree under `~/.claude/`.
+ */
+async function maybePromptGitignore(workspaceRoot: string, logger: Logger): Promise<boolean> {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const gitignorePath = path.join(workspaceRoot, '.gitignore');
+  let current: string;
+  try {
+    current = await fs.readFile(gitignorePath, 'utf8');
+  } catch {
+    return false; // no .gitignore → nothing to do (don't pester)
+  }
+  const ENTRY = '.claude/review-history/';
+  if (current.includes(ENTRY)) return false; // already there
+
+  const choice = await vscode.window.showInformationMessage(
+    'Claude Code Review writes an event log to .claude/review-history/. Add it to .gitignore so it isn\'t committed?',
+    'Add to .gitignore',
+    'Skip',
+  );
+  if (choice === 'Add to .gitignore') {
+    try {
+      const newline = current.endsWith('\n') ? '' : '\n';
+      await fs.writeFile(gitignorePath, `${current}${newline}${ENTRY}\n`, 'utf8');
+      void vscode.window.showInformationMessage('.gitignore updated.');
+      logger.info('history', 'gitignore.injected');
+    } catch (err) {
+      logger.warn('history', 'gitignore.inject.failed', { err: String(err) });
+    }
+  }
+  return true; // prompt was shown; suppress future prompts
 }
 
 export async function deactivate(): Promise<void> {

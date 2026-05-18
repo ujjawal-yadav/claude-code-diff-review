@@ -1,0 +1,25 @@
+.root {
+  /* Horizontal handle: fixed height, fills width. */
+  flex: 0 0 5px;
+  cursor: row-resize;
+  background: transparent;
+  position: relative;
+  user-select: none;
+  touch-action: none;
+}
+
+.indicator {
+  position: absolute;
+  inset: 2px 0;
+  background: var(--vscode-editorWidget-border, var(--vscode-panel-border));
+  transition: background-color 80ms ease;
+}
+
+.root:hover .indicator,
+.root:focus-visible .indicator {
+  background: var(--vscode-focusBorder);
+}
+
+.root:focus-visible {
+  outline: none;
+}

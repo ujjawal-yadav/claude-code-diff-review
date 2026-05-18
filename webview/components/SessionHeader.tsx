@@ -1,4 +1,5 @@
 import type { SessionReview } from '../../src/types';
+import { useUi } from '../store';
 import { send } from '../vscode';
 import styles from '../styles/SessionHeader.module.css';
 
@@ -11,6 +12,7 @@ interface Props {
 export function SessionHeader({ session, viewType, banner }: Props): JSX.Element {
   const totalHunks = session.metrics.totalHunks;
   const decided = session.metrics.acceptedHunks + session.metrics.rejectedHunks;
+  const undoDepth = useUi((s) => s.undoDepth);
   return (
     <header className={styles.root} role="banner">
       <div className={styles.titleRow}>
@@ -36,6 +38,15 @@ export function SessionHeader({ session, viewType, banner }: Props): JSX.Element
           aria-label="Reject all hunks in this session"
         >
           ✗ Reject all
+        </button>
+        <button
+          className={styles.bulk}
+          onClick={() => send({ type: 'undo-last-action' })}
+          disabled={undoDepth === 0}
+          aria-label="Undo last action"
+          title={undoDepth === 0 ? 'No actions to undo' : `Undo last action (${undoDepth} in history)`}
+        >
+          ↶ Undo{undoDepth > 0 ? ` (${undoDepth})` : ''}
         </button>
       </div>
     </header>

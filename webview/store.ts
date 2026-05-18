@@ -39,6 +39,12 @@ export interface UiState {
   /** Width of the file-list sidebar in pixels. Persisted via vscode.setState. */
   sidebarWidth: number;
 
+  /** Height of the session header (change-summary banner). Persisted. */
+  headerHeight: number;
+
+  /** Option A: depth of the orchestrator's undo stack (0 ⇒ disable ↶ button). */
+  undoDepth: number;
+
   /** Open chat thread (only one at a time in v1). */
   chat: ChatThread | null;
 
@@ -55,6 +61,8 @@ export interface UiState {
   dismissToast(id: number): void;
   setBanner(msg: string | null): void;
   setSidebarWidth(px: number): void;
+  setHeaderHeight(px: number): void;
+  setUndoDepth(depth: number): void;
 
   // chat
   openChat(filePath: string, hunkIndex: number): void;
@@ -71,9 +79,18 @@ const SIDEBAR_MIN = 160;
 const SIDEBAR_MAX = 600;
 const SIDEBAR_DEFAULT = 260;
 
-interface PersistedState { sidebarWidth?: number; viewType?: 'split' | 'unified' }
+const HEADER_MIN = 56;
+const HEADER_MAX = 600;
+const HEADER_DEFAULT = 140;
+
+interface PersistedState {
+  sidebarWidth?: number;
+  headerHeight?: number;
+  viewType?: 'split' | 'unified';
+}
 const persisted = getPersistedState<PersistedState>() ?? {};
 const initialSidebarWidth = clamp(persisted.sidebarWidth ?? SIDEBAR_DEFAULT, SIDEBAR_MIN, SIDEBAR_MAX);
+const initialHeaderHeight = clamp(persisted.headerHeight ?? HEADER_DEFAULT, HEADER_MIN, HEADER_MAX);
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
@@ -88,6 +105,8 @@ export const useUi = create<UiState>((set, get) => ({
   toasts: [],
   bannerMessage: null,
   sidebarWidth: initialSidebarWidth,
+  headerHeight: initialHeaderHeight,
+  undoDepth: 0,
 
   setSession(session, viewType) {
     const expanded: Record<string, boolean> = {};
@@ -169,6 +188,16 @@ export const useUi = create<UiState>((set, get) => ({
     // Persist asynchronously — vscode.setState is sync but we don't want
     // it on the drag hot path more often than necessary.
     setPersistedState({ ...(getPersistedState<PersistedState>() ?? {}), sidebarWidth: w });
+  },
+
+  setHeaderHeight(px) {
+    const h = clamp(Math.round(px), HEADER_MIN, HEADER_MAX);
+    set({ headerHeight: h });
+    setPersistedState({ ...(getPersistedState<PersistedState>() ?? {}), headerHeight: h });
+  },
+
+  setUndoDepth(depth) {
+    set({ undoDepth: Math.max(0, Math.floor(depth)) });
   },
 
   // -- chat ---------------------------------------------------------------

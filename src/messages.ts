@@ -79,9 +79,43 @@ export const WebviewToHost = z.discriminatedUnion('type', [
   z.object({ type: z.literal('set-oauth-token') }),
   z.object({ type: z.literal('use-claude-code-auth') }),
   z.object({ type: z.literal('revert-file-to-snapshot'), filePath: z.string() }),
+  z.object({
+    /** Phase α M9.2.9: undo the most recent decision on a hunk (within
+     *  the current panel session). The orchestrator inverse-toggles the
+     *  hunk's set membership and flips its status back to `pending`. */
+    type: z.literal('undo-hunk-decision'),
+    filePath: z.string(),
+    hunkIndex: z.number().int().nonnegative(),
+  }),
+  z.object({
+    /** Option A: session-level undo. Pops the most recent action snapshot
+     *  off the orchestrator's stack and restores every affected file's
+     *  acceptedSet, hunk statuses, and on-disk content. Editor-style Ctrl+Z. */
+    type: z.literal('undo-last-action'),
+  }),
   z.object({ type: z.literal('log'), level: z.enum(['debug', 'info', 'warn']), msg: z.string() }),
 ]);
 export type WebviewToHost = z.infer<typeof WebviewToHost>;
+
+// --------------------------------------------------------------------------
+// History webview ↔ Host (Phase α M9.2.8)
+//
+// A separate small protocol for the History panel. The history webview is
+// read-mostly: list sessions, load events for a clicked session. No mutation
+// in v0.2 (per-hunk undo lives on the review panel).
+// --------------------------------------------------------------------------
+
+export const HistoryWebviewToHost = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('ready') }),
+  z.object({ type: z.literal('load-session'), sessionId: z.string() }),
+  z.object({ type: z.literal('log'), level: z.enum(['debug', 'info', 'warn']), msg: z.string() }),
+]);
+export type HistoryWebviewToHost = z.infer<typeof HistoryWebviewToHost>;
+
+export function parseHistoryWebviewMessage(raw: unknown): HistoryWebviewToHost | null {
+  const r = HistoryWebviewToHost.safeParse(raw);
+  return r.success ? r.data : null;
+}
 
 // --------------------------------------------------------------------------
 // Host → Webview messages
@@ -98,6 +132,13 @@ import type {
   TokenUsage,
   SessionMetrics,
 } from './types.js';
+import type { HistoryEvent } from './history/historyEvents.js';
+import type { SessionIndexEntry } from './history/historyTypes.js';
+
+export type HistoryHostToWebview =
+  | { type: 'init'; sessions: SessionIndexEntry[]; root: string }
+  | { type: 'session-loaded'; sessionId: string; events: HistoryEvent[] }
+  | { type: 'error'; message: string };
 
 export type HostToWebview =
   | { type: 'init'; session: SessionReview; viewType: 'split' | 'unified' }
@@ -108,7 +149,26 @@ export type HostToWebview =
   | { type: 'chat-done'; chatId: string; usage: TokenUsage }
   | { type: 'chat-error'; chatId: string; error: { kind: string; message: string; retriable: boolean } }
   | { type: 'warning'; filePath?: string; kind: string; message: string }
-  | { type: 'view-type'; viewType: 'split' | 'unified' };
+  | { type: 'view-type'; viewType: 'split' | 'unified' }
+  | {
+      /**
+       * Set-based reversibility (Phase α Track 6) surfaced a conflict: the
+       * requested combination of accepted hunks cannot be rendered against
+       * the original snapshot. The orchestrator has reverted the set change.
+       * The webview should surface a banner offering "Re-accept coupled
+       * hunks" (which auto-adds `coupledHunks` back to the set).
+       */
+      type: 'set-conflict-warning';
+      filePath: string;
+      attemptedHunkIndex: number;
+      conflictingHunks: number[];
+    }
+  | {
+      /** Option A: orchestrator emits this after every push/pop on the
+       *  undo stack so the webview can enable/disable the ↶ Undo button. */
+      type: 'undo-stack-changed';
+      depth: number;
+    };
 
 // --------------------------------------------------------------------------
 // Validation helpers

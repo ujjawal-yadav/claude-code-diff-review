@@ -6,6 +6,7 @@ import { FileList } from './components/FileList';
 import { DiffPane } from './components/DiffPane';
 import { ChatOverlay } from './components/ChatOverlay';
 import { Splitter } from './components/Splitter';
+import { HeaderSplitter } from './components/HeaderSplitter';
 import type { HostToWebview } from '../src/messages';
 import styles from './styles/App.module.css';
 
@@ -26,6 +27,8 @@ export function App(): JSX.Element {
   const finaliseStreaming = useUi((s) => s.finaliseStreaming);
   const setChatError = useUi((s) => s.setChatError);
   const sidebarWidth = useUi((s) => s.sidebarWidth);
+  const headerHeight = useUi((s) => s.headerHeight);
+  const setUndoDepth = useUi((s) => s.setUndoDepth);
 
   useEffect(() => {
     function onMessage(ev: MessageEvent) {
@@ -50,6 +53,16 @@ export function App(): JSX.Element {
         case 'warning':
           pushToast({ level: 'warn', message: msg.message, ttl: 6000 });
           break;
+        case 'undo-stack-changed':
+          setUndoDepth(msg.depth);
+          break;
+        case 'set-conflict-warning':
+          pushToast({
+            level: 'warn',
+            message: `Coupled hunks: rejecting hunk #${msg.attemptedHunkIndex + 1} requires also rejecting hunk(s) ${msg.conflictingHunks.map((i) => `#${i + 1}`).join(', ')}.`,
+            ttl: 8000,
+          });
+          break;
         case 'chat-delta':
           appendStreamingDelta(msg.chatId, msg.text);
           break;
@@ -68,7 +81,7 @@ export function App(): JSX.Element {
     window.addEventListener('message', onMessage);
     send({ type: 'ready' });
     return () => window.removeEventListener('message', onMessage);
-  }, [setSession, applyHunk, applyFileUpdate, applySessionCompleted, setViewType, pushToast, appendStreamingDelta, finaliseStreaming, setChatError]);
+  }, [setSession, applyHunk, applyFileUpdate, applySessionCompleted, setViewType, pushToast, appendStreamingDelta, finaliseStreaming, setChatError, setUndoDepth]);
 
   if (!session) {
     return (
@@ -93,7 +106,13 @@ export function App(): JSX.Element {
 
   return (
     <main className={styles.layout}>
-      <SessionHeader session={session} viewType={viewType} banner={banner} />
+      <div
+        className={styles.headerContainer}
+        style={{ height: headerHeight }}
+      >
+        <SessionHeader session={session} viewType={viewType} banner={banner} />
+      </div>
+      <HeaderSplitter />
       <div className={styles.body}>
         <aside className={styles.sidebar} style={{ width: sidebarWidth }}>
           <FileList files={session.files} />

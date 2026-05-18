@@ -100,7 +100,12 @@ export type FileWarning =
   | 'external-edit'
   | 'binary-file'
   | 'write-failed'
-  | 'read-failed';
+  | 'read-failed'
+  /**
+   * Phase β.0 (10.1.4): file existed at reconstruction time per the history
+   * log but is absent on disk. Posted by `ReviewOrchestrator.adoptReconstructed`.
+   */
+  | 'vanished';
 
 export interface HunkReview {
   index: number;

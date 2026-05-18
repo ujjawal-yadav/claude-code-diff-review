@@ -195,6 +195,42 @@ export class SnapshotStore {
     session.turnStartedAt = null;
   }
 
+  /**
+   * Phase β.0 (10.1.4): seed a session's snapshot state from reconstructed
+   * history. Used by `ReviewOrchestrator.adoptReconstructed` to make a
+   * resumed session indistinguishable from one that was observed live.
+   *
+   * Critical ordering: must run BEFORE any new PreToolUse for the session
+   * lands. Otherwise `captureOriginal` reads already-mutated disk content
+   * and the re-diff is silently wrong.
+   */
+  injectSession(input: {
+    sessionId: string;
+    cwd: string;
+    originals: ReadonlyMap<AbsPath, string>;
+    currentTurnId: string | null;
+    lastTurnId: string | null;
+    turnStartedAt: number | null;
+    touched?: ReadonlySet<AbsPath>;
+    startedAt?: number;
+  }): void {
+    const sid = input.sessionId as SessionId;
+    const now = Date.now();
+    const session: SessionData = {
+      sessionId: sid,
+      cwd: input.cwd,
+      startedAt: input.startedAt ?? now,
+      originals: new Map(input.originals),
+      touched: new Set(input.touched ?? input.originals.keys()),
+      lastEventAt: now,
+      overBudget: false,
+      currentTurnId: input.currentTurnId,
+      turnStartedAt: input.turnStartedAt,
+      lastTurnId: input.lastTurnId,
+    };
+    this.sessions.set(sid, session);
+  }
+
   private getOrCreateSession(sessionId: SessionId, cwd: string): SessionData {
     const existing = this.sessions.get(sessionId);
     if (existing) return existing;

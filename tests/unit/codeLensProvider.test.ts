@@ -11,6 +11,8 @@ class StubPanel implements PanelGateway {
   async openOrFocus(_session: SessionReview) {}
   postFileUpdated(_filePath: AbsPath, _file: FileReview) {}
   postHunkApplied(_filePath: AbsPath, _hunkIndex: number, _status: HunkStatus) {}
+  postSetConflict(_filePath: AbsPath, _attemptedHunkIndex: number, _conflictingHunks: number[]) {}
+  postUndoStackDepth(_sid: SessionId, _depth: number) {}
   postSessionCompleted(_sessionId: SessionId, _metrics: SessionMetrics) {}
   close(_sessionId: SessionId) {}
 }

@@ -26,7 +26,7 @@ async function readSettings(workspaceRoot: string): Promise<unknown> {
 
 describe('hookConfigurator — install', () => {
   it('creates .claude/settings.json from scratch with marker entries', async () => {
-    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117 });
+    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117, scope: 'workspace' });
     const root = await readSettings(tmp) as {
       hooks: { PreToolUse: Array<Record<string, unknown>>; PostToolUse: Array<Record<string, unknown>>; Stop: Array<Record<string, unknown>> };
     };
@@ -53,7 +53,7 @@ describe('hookConfigurator — install', () => {
       JSON.stringify({ hooks: { PreToolUse: [userEntry] } }, null, 2),
     );
 
-    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117 });
+    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117, scope: 'workspace' });
     const root = await readSettings(tmp) as {
       hooks: { PreToolUse: Array<Record<string, unknown>> };
     };
@@ -64,8 +64,8 @@ describe('hookConfigurator — install', () => {
   });
 
   it('is idempotent: running twice does not duplicate marked entries', async () => {
-    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117 });
-    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117 });
+    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117, scope: 'workspace' });
+    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117, scope: 'workspace' });
     const root = await readSettings(tmp) as { hooks: { PreToolUse: unknown[]; PostToolUse: unknown[]; Stop: unknown[] } };
     expect(root.hooks.PreToolUse.length).toBe(1);
     expect(root.hooks.PostToolUse.length).toBe(1);
@@ -73,8 +73,8 @@ describe('hookConfigurator — install', () => {
   });
 
   it('updates the URL when port changes', async () => {
-    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117 });
-    await ensureHooksInstalled({ workspaceRoot: tmp, port: 60000 });
+    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117, scope: 'workspace' });
+    await ensureHooksInstalled({ workspaceRoot: tmp, port: 60000, scope: 'workspace' });
     const root = await readSettings(tmp) as {
       hooks: { Stop: Array<{ hooks: Array<{ url: string }> }> };
     };
@@ -85,7 +85,7 @@ describe('hookConfigurator — install', () => {
     const dir = path.join(tmp, '.claude');
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, 'settings.json'), '{ this is not json');
-    await expect(ensureHooksInstalled({ workspaceRoot: tmp, port: 53117 })).rejects.toThrow(/malformed/i);
+    await expect(ensureHooksInstalled({ workspaceRoot: tmp, port: 53117, scope: 'workspace' })).rejects.toThrow(/malformed/i);
   });
 });
 
@@ -98,8 +98,8 @@ describe('hookConfigurator — remove', () => {
       path.join(dir, 'settings.json'),
       JSON.stringify({ hooks: { PreToolUse: [userEntry] } }, null, 2),
     );
-    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117 });
-    await removeHooks({ workspaceRoot: tmp });
+    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117, scope: 'workspace' });
+    await removeHooks({ workspaceRoot: tmp, scope: 'workspace' });
 
     const root = await readSettings(tmp) as { hooks?: { PreToolUse?: unknown[] } };
     expect(root.hooks?.PreToolUse?.length).toBe(1);
@@ -109,13 +109,13 @@ describe('hookConfigurator — remove', () => {
   });
 
   it('drops empty hook events and the hooks block when empty', async () => {
-    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117 });
-    await removeHooks({ workspaceRoot: tmp });
+    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117, scope: 'workspace' });
+    await removeHooks({ workspaceRoot: tmp, scope: 'workspace' });
     const root = await readSettings(tmp) as { hooks?: unknown };
     expect(root.hooks).toBeUndefined();
   });
 
   it('is a no-op when settings file is absent', async () => {
-    await expect(removeHooks({ workspaceRoot: tmp })).resolves.not.toThrow();
+    await expect(removeHooks({ workspaceRoot: tmp, scope: 'workspace' })).resolves.not.toThrow();
   });
 });

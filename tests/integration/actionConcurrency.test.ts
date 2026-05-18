@@ -27,6 +27,7 @@ import {
 class CapturingPanel implements PanelGateway {
   fileUpdates: Array<{ filePath: AbsPath; warnings: string[] }> = [];
   hunkApplied: Array<{ filePath: AbsPath; hunkIndex: number; status: HunkStatus }> = [];
+  setConflicts: Array<{ filePath: AbsPath; attemptedHunkIndex: number; conflictingHunks: number[] }> = [];
   completed: Array<{ sessionId: SessionId }> = [];
   async openOrFocus(_session: SessionReview) {}
   postFileUpdated(filePath: AbsPath, file: FileReview) {
@@ -35,6 +36,11 @@ class CapturingPanel implements PanelGateway {
   postHunkApplied(filePath: AbsPath, hunkIndex: number, status: HunkStatus) {
     this.hunkApplied.push({ filePath, hunkIndex, status });
   }
+  postSetConflict(filePath: AbsPath, attemptedHunkIndex: number, conflictingHunks: number[]) {
+    this.setConflicts.push({ filePath, attemptedHunkIndex, conflictingHunks });
+  }
+  undoDepths: number[] = [];
+  postUndoStackDepth(_sid: SessionId, depth: number) { this.undoDepths.push(depth); }
   postSessionCompleted(sessionId: SessionId, _metrics: SessionMetrics) {
     this.completed.push({ sessionId });
   }

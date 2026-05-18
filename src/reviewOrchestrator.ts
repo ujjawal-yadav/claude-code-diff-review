@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { computeDiff } from './diffEngine.js';
 import { initialHunkSetState, renderFileFromHunkSet } from './core/hunkSet.js';
 import type { HistoryService } from './history/historyService.js';
+import type { ReconstructedSessionReview } from './history/historyTypes.js';
 import { Logger } from './logger.js';
 import { SnapshotStore } from './snapshotStore.js';
 import {
@@ -13,6 +14,7 @@ import {
   ComputedDiff,
   FileReview,
   FileStatus,
+  FileWarning,
   HunkReview,
   HunkSetState,
   HunkStatus,
@@ -510,6 +512,122 @@ export class ReviewOrchestrator {
     return { session, file: hit.file };
   }
 
+  /**
+   * Phase β.0 (10.1.4): adopt a `ReconstructedSessionReview` into the live
+   * orchestrator state so a closed/aborted session can be re-opened.
+   *
+   * Restores every per-session map in lockstep — `sessions`, `byPath`,
+   * `globalByPath`, `hunkSets`, `undoStack` (empty: cross-session undo is
+   * dev-mode-gated) — and seeds `SnapshotStore` via `injectSession` so a
+   * subsequent PreToolUse does NOT re-capture already-mutated content as
+   * the "original."
+   *
+   * Drift handling per file:
+   *   - 'clean':   render as normal
+   *   - 'drifted': attach 'external-edit' warning; afterContent kept as
+   *                reconstructed (re-diff against current disk happens on
+   *                next save via `scheduleReDiff`)
+   *   - 'missing': attach 'vanished' warning
+   *
+   * Does NOT call `panel.openOrFocus` — caller decides when to surface the
+   * UI (Open Review Panel command in 10.1.7 / History panel Resume in 10.1.8).
+   *
+   * Invariant: Resume re-opens the prior turn. Decisions appended after
+   * Resume carry the reconstructed turnId — preserving the audit lineage.
+   */
+  adoptReconstructed(reconstructed: ReconstructedSessionReview): SessionReview {
+    const sid = asSessionId(reconstructed.sessionId);
+
+    // Seed SnapshotStore FIRST so a racing PreToolUse reads the historical
+    // `before` content and not the on-disk mutated state.
+    const originals = new Map<AbsPath, string>();
+    for (const f of reconstructed.files) {
+      originals.set(asAbsPath(f.filePath), f.before);
+    }
+    this.opts.store.injectSession({
+      sessionId: sid,
+      cwd: reconstructed.cwd,
+      originals,
+      // Re-open the prior turn — decisions append under the original turnId.
+      // (Architectural decision #8 in the plan.)
+      currentTurnId: reconstructed.turnId,
+      lastTurnId: reconstructed.turnId,
+      turnStartedAt: null,
+    });
+
+    // Build FileReview list. Per-file drift translates to warnings.
+    const files: FileReview[] = reconstructed.files.map((f) => {
+      const warnings: FileWarning[] = [];
+      const drift = reconstructed.driftPerFile[f.relPath];
+      if (drift === 'drifted') warnings.push('external-edit');
+      if (drift === 'missing') warnings.push('vanished');
+      if (f.isBinary) warnings.push('binary-file');
+      const hunks: HunkReview[] = f.hunks.map((h) => {
+        const entry: HunkReview = {
+          index: h.index,
+          oldStart: h.oldStart,
+          oldLines: h.oldLines,
+          newStart: h.newStart,
+          newLines: h.newLines,
+          header: h.header,
+          lines: h.lines.slice(),
+          status: h.status,
+        };
+        if (h.decidedAt !== undefined) entry.decidedAt = h.decidedAt;
+        return entry;
+      });
+      const fileReview: FileReview = {
+        filePath: asAbsPath(f.filePath),
+        relPath: f.relPath,
+        before: f.before,
+        after: f.after,
+        hunks,
+        status: recomputeFileStatus(hunks),
+        isNew: f.isNew,
+        isDeleted: f.isDeleted,
+        isBinary: f.isBinary,
+        warnings,
+      };
+      return fileReview;
+    });
+
+    const review: SessionReview = {
+      sessionId: sid,
+      cwd: reconstructed.cwd,
+      startedAt: reconstructed.lastEventAt, // best approximation from log
+      openedAt: Date.now(),
+      lastAssistantMessage: null,
+      files,
+      state: 'open',
+      metrics: recomputeMetrics(files),
+    };
+    this.sessions.set(sid, review);
+    this.indexFiles(sid, files);
+
+    // Restore hunkSets from reconstructed acceptedSet (NOT initialHunkSetState
+    // which defaults to all-applied).
+    const perSession = new Map<AbsPath, HunkSetState>();
+    for (const hs of reconstructed.hunkSets) {
+      const abs = asAbsPath(hs.filePath);
+      perSession.set(abs, {
+        filePath: abs,
+        originalSnapshot: hs.originalSnapshot,
+        allHunks: hs.allHunks.map((h) => ({ ...h, lines: h.lines.slice() })),
+        acceptedSet: new Set(hs.acceptedSet),
+      });
+    }
+    this.hunkSets.set(sid, perSession);
+
+    // Cross-session undo is dev-mode-gated and out of scope for β.0.
+    this.undoStack.set(sid, []);
+
+    this.opts.logger.info('orchestrator', 'session.adopted', {
+      sid, files: files.length, turnId: reconstructed.turnId,
+    });
+    this.notifyChange();
+    return review;
+  }
+
   // -- denormalised index maintenance ----------------------------------------
 
   private indexFiles(sid: SessionId, files: FileReview[]): void {
@@ -612,8 +730,10 @@ export class ReviewOrchestrator {
     // Phase α Track 1: emit `turn-stopped` into the event log. We have
     // every file's full diff (hunks + before/after content) right here,
     // so this single record captures the whole turn for crash recovery
-    // and the History panel. Fire-and-forget; never block the user flow.
-    void this.recordTurnStoppedEvent(sid, review, sessionData.cwd, lastAssistantMessage);
+    // and the History panel. Awaited (not fire-and-forget) so a fast
+    // crash after Stop still has a durable turn boundary — without this,
+    // reconstructSessionReview can race and see only turn-started.
+    await this.recordTurnStoppedEvent(sid, review, sessionData.cwd, lastAssistantMessage);
   }
 
   /**
@@ -703,7 +823,11 @@ export class ReviewOrchestrator {
     const history = this.opts.history;
     if (!history) return;
     const sessionData = this.opts.store.get(sid);
-    const turnId = sessionData?.currentTurnId;
+    // Hunk decisions fire AFTER the panel opens, which is AFTER Stop, which
+    // clears `currentTurnId`. The retained `lastTurnId` holds the UUID for
+    // the turn whose review the user is acting on. Without this fallback,
+    // every panel-driven decision would silently skip the event log.
+    const turnId = sessionData?.currentTurnId ?? sessionData?.lastTurnId;
     if (!turnId) return;
     void history.recordHunkDecided({
       sessionId: sid,
@@ -743,10 +867,11 @@ export class ReviewOrchestrator {
     const history = this.opts.history;
     if (!history) return;
     const sessionData = this.opts.store.get(sid);
-    const turnId =
-      sessionData?.currentTurnId
-      ?? sessionData?.lastTurnId
-      ?? sid;
+    // `?? sid` was previously here as a last-resort fallback, but sessionId
+    // is not a UUID — the event would be written to disk yet rejected by
+    // `decodeEvent` on read. Bail cleanly instead.
+    const turnId = sessionData?.currentTurnId ?? sessionData?.lastTurnId;
+    if (!turnId) return;
     const postRecord: Record<string, string> = {};
     for (const [abs, content] of postContents) {
       postRecord[relPathByAbs(abs)] = content;
@@ -771,7 +896,9 @@ export class ReviewOrchestrator {
     const history = this.opts.history;
     if (!history) return;
     const sessionData = this.opts.store.get(sid);
-    const turnId = sessionData?.currentTurnId;
+    // Same post-Stop fallback as recordHunkDecisionEvent: revert fires after
+    // the panel opens, so `currentTurnId` is already null.
+    const turnId = sessionData?.currentTurnId ?? sessionData?.lastTurnId;
     if (!turnId) return;
     void history.recordFileSnapshotReverted({
       sessionId: sid,
@@ -791,10 +918,17 @@ export class ReviewOrchestrator {
     const history = this.opts.history;
     if (!history) return;
     const sessionData = this.opts.store.get(sid);
-    // Use the active turn id if still live; some Stops arrive after `endTurn`
-    // (handleStop calls endTurn before openReview). Fall back to a synthetic
-    // turn id derived from the session to keep the event well-formed.
-    const turnId = sessionData?.currentTurnId ?? sessionData?.sessionId ?? sid;
+    // `handleStop` calls `endTurn(sid)` BEFORE `openReview`, so by the time
+    // this runs, `currentTurnId` is null but the retained `lastTurnId` still
+    // holds the UUID minted at the first PreToolUse. We MUST surface that
+    // (not the sessionId) — the event schema's `turnId` requires a UUID, and
+    // a non-UUID fallback would be rejected by `decodeEvent` on read and
+    // produce a phantom "no turn-stopped" reconstruction with empty hunks.
+    const turnId = sessionData?.currentTurnId ?? sessionData?.lastTurnId;
+    if (!turnId) {
+      this.opts.logger.warn('orchestrator', 'history.turnStopped.no-turn', { sid });
+      return;
+    }
     try {
       await history.recordTurnStopped({
         sessionId: sid,

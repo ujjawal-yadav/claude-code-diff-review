@@ -123,6 +123,16 @@ export class ReviewPanelManager implements PanelGateway {
     this.post(sid, { type: 'hunk-applied', filePath, hunkIndex, action: status });
   }
 
+  postSetConflict(filePath: AbsPath, attemptedHunkIndex: number, conflictingHunks: number[]): void {
+    const sid = this.findSessionForFile(filePath);
+    if (!sid) return;
+    this.post(sid, { type: 'set-conflict-warning', filePath, attemptedHunkIndex, conflictingHunks });
+  }
+
+  postUndoStackDepth(sessionId: SessionId, depth: number): void {
+    this.post(sessionId, { type: 'undo-stack-changed', depth });
+  }
+
   postSessionCompleted(sessionId: SessionId, metrics: SessionMetrics): void {
     this.post(sessionId, { type: 'session-completed', sessionId, metrics });
   }
@@ -238,6 +248,16 @@ export class ReviewPanelManager implements PanelGateway {
         break;
       case 'revert-file-to-snapshot':
         await o.revertFileToSnapshot(sessionId, msg.filePath);
+        break;
+      case 'undo-hunk-decision':
+        // Phase α M9.2.9: undo the latest decision on this hunk (flips its
+        // set membership and marks the hunk back to 'pending'). Within
+        // the current panel session only — cross-turn undo is Phase β.
+        await o.handleUndoHunkDecision(sessionId, msg.filePath, msg.hunkIndex);
+        break;
+      case 'undo-last-action':
+        // Option A: editor-style Ctrl+Z over the action history.
+        await o.handleUndoLastAction(sessionId);
         break;
       case 'log':
         this.opts.logger[msg.level]('webview', 'log', { msg: msg.msg });

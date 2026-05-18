@@ -34,9 +34,7 @@ const extensionBuild = {
   logLevel:    'info',
 };
 
-const webviewBuild = {
-  entryPoints: [resolve(__dirname, 'webview/index.tsx')],
-  outfile:     resolve(__dirname, 'dist/webview/index.js'),
+const sharedWebviewOpts = {
   bundle:      true,
   platform:    'browser',
   format:      'iife',
@@ -66,14 +64,34 @@ const webviewBuild = {
   logLevel: 'info',
 };
 
+const webviewBuild = {
+  ...sharedWebviewOpts,
+  entryPoints: [resolve(__dirname, 'webview/index.tsx')],
+  outfile:     resolve(__dirname, 'dist/webview/index.js'),
+};
+
+// Phase α M9.2.8: dedicated History panel bundle. Separate entry +
+// output so the review panel and history panel each load only what they
+// need.
+const historyWebviewBuild = {
+  ...sharedWebviewOpts,
+  entryPoints: [resolve(__dirname, 'webview/history/index.tsx')],
+  outfile:     resolve(__dirname, 'dist/webview/history/index.js'),
+};
+
 async function run() {
   if (watch) {
     const ext = await context(extensionBuild);
     const wv  = await context(webviewBuild);
-    await Promise.all([ext.watch(), wv.watch()]);
+    const hv  = await context(historyWebviewBuild);
+    await Promise.all([ext.watch(), wv.watch(), hv.watch()]);
     console.log('[esbuild] watching…');
   } else {
-    await Promise.all([build(extensionBuild), build(webviewBuild)]);
+    await Promise.all([
+      build(extensionBuild),
+      build(webviewBuild),
+      build(historyWebviewBuild),
+    ]);
     console.log('[esbuild] build complete');
   }
 }

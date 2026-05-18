@@ -54,6 +54,17 @@ export function HunkBlock({ filePath, hunk, viewType, selected, onSelect }: Prop
           >
             ✗ Reject
           </button>
+          {decided && (
+            <button
+              type="button"
+              className={`${styles.btn} ${styles.btnChat}`}
+              onClick={() => send({ type: 'undo-hunk-decision', filePath, hunkIndex: hunk.index })}
+              aria-label={`Undo decision on hunk ${hunk.index + 1}`}
+              title="Undo this decision (within-turn)"
+            >
+              ↶ Undo
+            </button>
+          )}
           <button
             type="button"
             className={`${styles.btn} ${styles.btnChat}`}

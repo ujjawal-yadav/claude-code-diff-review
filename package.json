@@ -31,17 +31,23 @@
     "commands": [
       { "command": "claudeReview.openPanel",          "title": "Claude Review: Open Review Panel" },
       { "command": "claudeReview.removeHooks",        "title": "Claude Review: Remove Hooks" },
+      { "command": "claudeReview.switchInstallScope", "title": "Claude Review: Switch Install Scope (user ↔ workspace)" },
       { "command": "claudeReview.setApiKey",          "title": "Claude Review: Set Anthropic API Key" },
       { "command": "claudeReview.clearApiKey",        "title": "Claude Review: Clear Anthropic API Key" },
       { "command": "claudeReview.setOAuthToken",      "title": "Claude Review: Set Claude OAuth Token (Max plan)" },
       { "command": "claudeReview.clearOAuthToken",    "title": "Claude Review: Clear Claude OAuth Token" },
       { "command": "claudeReview.useClaudeCodeAuth",  "title": "Claude Review: Use Claude Code Auth (probe & report)" },
       { "command": "claudeReview.rotateBearerToken",  "title": "Claude Review: Rotate Bearer Token" },
-      { "command": "claudeReview.showLog",            "title": "Claude Review: Show Log" }
+      { "command": "claudeReview.showLog",            "title": "Claude Review: Show Log" },
+      { "command": "claudeReview.openHistory",        "title": "Claude Review: Open History Panel" }
     ],
     "configuration": {
       "title": "Claude Code Diff Review",
       "properties": {
+        "claudeReview.installScope":            { "type": "string",  "default": "user",       "enum": ["user", "workspace"], "description": "Where to install Claude Code hooks. `user` (default) writes to ~/.claude/settings.json so every project picks them up automatically. `workspace` writes to <workspace>/.claude/settings.json — per-project. Use the 'Switch Install Scope' command to toggle." },
+        "claudeReview.history.enabled":         { "type": "boolean", "default": true,         "description": "Persist every Claude Code turn (started, stopped, hunk decisions) to a content-addressed event log. Powers the History panel and crash recovery. Disable to opt out entirely; existing logs are not deleted." },
+        "claudeReview.history.retentionDays":   { "type": "number",  "default": 30,           "description": "Number of days to retain Memory Design event log sessions. The retention sweeper removes older sessions + their unreferenced blobs every 10 minutes." },
+        "claudeReview.history.crossTurnUndo":   { "type": "boolean", "default": false,        "description": "Phase α Q2.3: enable cross-turn undo in the History panel (developer-mode flag). Within-turn undo (↶ on decided hunks) is always on. Cross-turn undo uses rebase semantics and may cascade — gated behind this flag in v0.2 until real-world data informs the safer default." },
         "claudeReview.port":                    { "type": "number",  "default": 53117,        "description": "Preferred loopback port. 0 = always dynamic." },
         "claudeReview.autoOpenPanel":           { "type": "boolean", "default": true,         "description": "Open the review panel automatically when Claude Code finishes a turn." },
         "claudeReview.defaultDiffView":         { "type": "string",  "default": "split",      "enum": ["split", "unified"], "description": "Initial diff view mode." },

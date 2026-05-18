@@ -4,6 +4,16 @@
   height: 100vh;
 }
 
+/* Height-bound container for the session header; the inner SessionHeader
+   may overflow when the user shrinks this and the banner is long, so we
+   give it `overflow: auto` to scroll internally instead of clipping. */
+.headerContainer {
+  flex: 0 0 auto;
+  overflow: auto;
+  min-height: 56px;
+  max-height: 600px;
+}
+
 .body {
   display: flex;
   flex: 1;
