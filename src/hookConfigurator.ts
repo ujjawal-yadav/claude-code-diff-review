@@ -3,6 +3,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 
+import { agentAdapters } from './adapters/index.js';
+
 /**
  * `.claude/settings.json` manager (TRD §5.3 + Phase α Track 2).
  *
@@ -42,9 +44,6 @@ import * as crypto from 'node:crypto';
 
 export const HOOK_MARKER_KEY   = 'x-claude-review-extension';
 export const HOOK_MARKER_VALUE = 'v1';
-
-const MATCHER = 'Write|Edit|MultiEdit';
-const TIMEOUT_SEC = 10;
 
 interface HookEntry {
   [k: string]: unknown;
@@ -99,12 +98,25 @@ export async function ensureHooksInstalled(opts: HookConfigOptions): Promise<voi
     }
   }
 
+  // Delegate entry construction to the Claude Code adapter. The
+  // adapter owns the wire format; this module owns the file-merge
+  // policy (marker filtering, atomic write, malformed-JSON refusal).
+  const adapter = agentAdapters.get('claude-code')!;
+  // workspaceRoot may be null for user-scope installs; the adapter only uses
+  // it when scope==='workspace' (and currently throws on 'user'). Empty string
+  // is a safe placeholder for the user-scope branch.
+  const generated = adapter.generateHookConfig({
+    scope: 'workspace',
+    workspaceRoot: opts.workspaceRoot ?? '',
+    port: opts.port,
+  }) as Record<'PreToolUse' | 'PostToolUse' | 'Stop', HookEntry>;
+
   root.hooks = root.hooks ?? {};
   for (const event of ['PreToolUse', 'PostToolUse', 'Stop'] as const) {
     const arr = root.hooks[event] ?? [];
     // Strip our own marked entries (handles version upgrades + port changes).
     const userOwned = arr.filter((e) => e?.[HOOK_MARKER_KEY] !== HOOK_MARKER_VALUE);
-    userOwned.push(buildEntry(event, opts.port));
+    userOwned.push(generated[event]);
     root.hooks[event] = userOwned;
   }
 
@@ -206,32 +218,6 @@ function parseStrict(raw: string): SettingsRoot {
   }
 }
 
-function buildEntry(event: 'PreToolUse' | 'PostToolUse' | 'Stop', port: number): HookEntry {
-  const base: Record<string, unknown> = {};
-  base[HOOK_MARKER_KEY] = HOOK_MARKER_VALUE;
-  if (event !== 'Stop') {
-    base.matcher = MATCHER;
-  }
-  base.hooks = [
-    {
-      type: 'http',
-      url: `http://127.0.0.1:${port}/${routeFor(event)}`,
-      timeout: TIMEOUT_SEC,
-      headers: { Authorization: 'Bearer $CLAUDE_REVIEW_TOKEN' },
-      allowedEnvVars: ['CLAUDE_REVIEW_TOKEN'],
-    },
-  ];
-  return base as HookEntry;
-}
-
-function routeFor(event: 'PreToolUse' | 'PostToolUse' | 'Stop'): string {
-  switch (event) {
-    case 'PreToolUse':  return 'pre-tool-use';
-    case 'PostToolUse': return 'post-tool-use';
-    case 'Stop':        return 'stop';
-  }
-}
-
 async function atomicWrite(target: string, content: string): Promise<void> {
   const tmp = `${target}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   await fs.writeFile(tmp, content, { encoding: 'utf8', mode: 0o644 });
@@ -243,4 +229,4 @@ function isNoEnt(err: unknown): boolean {
 }
 
 /** Exported for unit tests. */
-export const __test = { buildEntry, parseStrict, atomicWrite };
+export const __test = { parseStrict, atomicWrite };

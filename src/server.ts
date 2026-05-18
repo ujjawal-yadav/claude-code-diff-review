@@ -7,6 +7,7 @@ import {
   PostToolUsePayload,
   StopPayload,
 } from './messages.js';
+import { agentAdapters } from './adapters/index.js';
 
 /**
  * Loopback HTTP server (TRD §5.2, §14.2).
@@ -69,35 +70,55 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
 
   fastify.get('/health', async () => ({ ok: true, version: '0.1.0' }));
 
+  // Parsing + tool-name gating is delegated to the registered agent
+  // adapter (M9.4a). Today only Claude Code is wired in; the cast is
+  // safe because the registry is built at module load and that entry
+  // is guaranteed present (see src/adapters/index.ts).
+  const adapter = agentAdapters.get('claude-code')!;
+
   fastify.post('/pre-tool-use', wrap(logger, '/pre-tool-use', async (req) => {
-    const parsed = PreToolUsePayload.safeParse(req.body);
-    if (!parsed.success) {
-      logger.warn('server', 'payload.invalid', { route: '/pre-tool-use', issues: parsed.error.issues });
+    const normalised = adapter.parsePreToolUse(req.body);
+    if (!normalised) {
+      // Either schema-invalid or a non-edit tool — silently drop.
+      // (Schema-validity is still observable via logger.warn from the
+      // adapter when we wire that in M9.4b; today the contract is
+      // "return null on either reason".)
+      const validated = PreToolUsePayload.safeParse(req.body);
+      if (!validated.success) {
+        logger.warn('server', 'payload.invalid', { route: '/pre-tool-use', issues: validated.error.issues });
+      }
       return {};
     }
-    if (!matchesEditTool(parsed.data.tool_name)) return {};
-    await opts.onPreToolUse(parsed.data);
+    // Existing callback contract (back-compat with M1 tests + extension.ts)
+    // takes the raw PreToolUsePayload. Re-parse to satisfy the type; the
+    // adapter just succeeded, so this `parse` cannot throw.
+    await opts.onPreToolUse(PreToolUsePayload.parse(req.body));
     return {};
   }));
 
   fastify.post('/post-tool-use', wrap(logger, '/post-tool-use', async (req) => {
-    const parsed = PostToolUsePayload.safeParse(req.body);
-    if (!parsed.success) {
-      logger.warn('server', 'payload.invalid', { route: '/post-tool-use', issues: parsed.error.issues });
+    const normalised = adapter.parsePostToolUse(req.body);
+    if (!normalised) {
+      const validated = PostToolUsePayload.safeParse(req.body);
+      if (!validated.success) {
+        logger.warn('server', 'payload.invalid', { route: '/post-tool-use', issues: validated.error.issues });
+      }
       return {};
     }
-    if (!matchesEditTool(parsed.data.tool_name)) return {};
-    await opts.onPostToolUse(parsed.data);
+    await opts.onPostToolUse(PostToolUsePayload.parse(req.body));
     return {};
   }));
 
   fastify.post('/stop', wrap(logger, '/stop', async (req) => {
-    const parsed = StopPayload.safeParse(req.body);
-    if (!parsed.success) {
-      logger.warn('server', 'payload.invalid', { route: '/stop', issues: parsed.error.issues });
+    const normalised = adapter.parseStop(req.body);
+    if (!normalised) {
+      const validated = StopPayload.safeParse(req.body);
+      if (!validated.success) {
+        logger.warn('server', 'payload.invalid', { route: '/stop', issues: validated.error.issues });
+      }
       return {};
     }
-    await opts.onStop(parsed.data);
+    await opts.onStop(StopPayload.parse(req.body));
     return {};
   }));
 

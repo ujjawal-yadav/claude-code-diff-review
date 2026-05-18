@@ -18,6 +18,7 @@ import { showOnboardingIfNeeded } from './onboarding.js';
 import { HunkCodeLensProvider, ACCEPT_HUNK_AT, REJECT_HUNK_AT } from './codeLensProvider.js';
 import { createTelemetry } from './telemetry.js';
 import { asAbsPath } from './types.js';
+import { agentAdapters } from './adapters/index.js';
 import type { PreToolUsePayload, PostToolUsePayload, StopPayload } from './messages.js';
 
 /**
@@ -184,24 +185,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   context.subscriptions.push({ dispose: () => scm?.dispose() });
 
+  // PreToolUse / PostToolUse run after server-side adapter validation.
+  // We dispatch through the adapter registry here as well so the agentId
+  // tag propagates onto SessionData (and ultimately SessionReview). When
+  // a second adapter lands (M9.4b), the only change here is to pick the
+  // adapter based on a route-level discriminator.
+  const claudeAdapter = agentAdapters.get('claude-code')!;
   const onPreToolUse = async (p: PreToolUsePayload) => {
+    const norm = claudeAdapter.parsePreToolUse(p);
+    if (!norm || !norm.filePath) return;
     // Phase α Track 6 + Track 1: mint a turn id if this is the first edit of
     // a new turn, capture the before-snapshot, and emit `turn-started` into
     // the event log on freshly-minted turns. All best-effort.
-    const turnInfo = store.beginTurnIfNeeded(p.session_id, p.cwd);
-    const resolved = await store.captureOriginal(p.session_id, p.cwd, p.tool_input.file_path);
+    const turnInfo = store.beginTurnIfNeeded(norm.sessionId, norm.cwd, norm.agentId);
+    const resolved = await store.captureOriginal(norm.sessionId, norm.cwd, norm.filePath, norm.agentId);
     if (resolved == null) {
-      logger?.warn('hooks', 'pre.path-rejected', { sid: p.session_id, raw: p.tool_input.file_path });
+      logger?.warn('hooks', 'pre.path-rejected', { sid: norm.sessionId, raw: norm.filePath });
       return;
     }
     if (turnInfo.freshlyMinted && history) {
-      const before = store.get(p.session_id)?.originals.get(resolved) ?? null;
+      const before = store.get(norm.sessionId)?.originals.get(resolved) ?? null;
       void history.recordTurnStarted({
-        sessionId: p.session_id,
+        sessionId: norm.sessionId,
         turnId: turnInfo.turnId,
-        agentId: 'claude-code',
+        agentId: norm.agentId,
         files: [{
-          relPath: relPathFromCwd(p.cwd, resolved),
+          relPath: relPathFromCwd(norm.cwd, resolved),
           beforeContent: before,
           mtimeMs: null,
         }],
@@ -209,9 +218,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   };
   const onPostToolUse = async (p: PostToolUsePayload) => {
-    const resolved = store.recordTouched(p.session_id, p.cwd, p.tool_input.file_path);
+    const norm = claudeAdapter.parsePostToolUse(p);
+    if (!norm || !norm.filePath) return;
+    const resolved = store.recordTouched(norm.sessionId, norm.cwd, norm.filePath, norm.agentId);
     if (resolved == null) {
-      logger?.warn('hooks', 'post.path-rejected', { sid: p.session_id, raw: p.tool_input.file_path });
+      logger?.warn('hooks', 'post.path-rejected', { sid: norm.sessionId, raw: norm.filePath });
     }
   };
   const onStop = async (p: StopPayload) => {

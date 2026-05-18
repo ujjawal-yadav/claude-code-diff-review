@@ -594,6 +594,7 @@ export class ReviewOrchestrator {
     const review: SessionReview = {
       sessionId: sid,
       cwd: reconstructed.cwd,
+      agentId: reconstructed.agentId,
       startedAt: reconstructed.lastEventAt, // best approximation from log
       openedAt: Date.now(),
       lastAssistantMessage: null,
@@ -703,6 +704,7 @@ export class ReviewOrchestrator {
     }
 
     const review: SessionReview = {
+      agentId: sessionData.agentId,
       sessionId: sid,
       cwd: sessionData.cwd,
       startedAt: sessionData.startedAt,
