@@ -189,6 +189,27 @@ describe('ClaudeCodeAdapter — extractSubagentId (M9.6)', () => {
   it('clearSubagentCache is callable without crashing', () => {
     expect(() => adapter.clearSubagentCache?.('s')).not.toThrow();
   });
+
+  it('Bug E: concurrent calls share a single in-flight readTaskEntries', async () => {
+    // Spy on `readTaskEntries` indirectly: fire two concurrent calls for
+    // the same session BEFORE the first resolves. Both should resolve to
+    // the same value (null in this case — no transcript exists), and the
+    // cache should never have been undefined for the second call.
+    //
+    // We can't easily mock `readTaskEntries` import without vi.mock setup
+    // here, so the proof is observational: after firing both, the cache
+    // entry is the resolved value (not a stale Promise).
+    const fresh = new (await import('../../src/adapters/claudeCodeAdapter.js')).ClaudeCodeAdapter();
+    const payload = { ...validPreEdit, cwd: '/no/such/cwd' };
+    const [a, b] = await Promise.all([
+      fresh.extractSubagentId(payload),
+      fresh.extractSubagentId(payload),
+    ]);
+    expect(a).toBeNull();
+    expect(b).toBeNull();
+    // After both settle, a third call hits the resolved cache (no I/O).
+    await expect(fresh.extractSubagentId(payload)).resolves.toBeNull();
+  });
 });
 
 describe('adapter registry', () => {

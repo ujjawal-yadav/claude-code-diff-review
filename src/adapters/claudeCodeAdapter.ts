@@ -65,8 +65,17 @@ export class ClaudeCodeAdapter implements AgentAdapter {
    * `null` value means "we tried to load and the transcript didn't exist or
    * contained no Task entries" — caching the negative result avoids
    * repeated I/O on every PreToolUse in a session that has no sub-agents.
+   *
+   * Bug E fix: the value can also be an in-flight `Promise<...>`. Concurrent
+   * `extractSubagentId` calls for the same session pre-cache the Promise,
+   * so subsequent callers `await` the SAME read instead of kicking off a
+   * second `readTaskEntries`. Resolves to the array or null, then the
+   * cache entry is replaced with the resolved value.
    */
-  private readonly taskCache = new Map<string, ReadonlyArray<TaskEntry> | null>();
+  private readonly taskCache = new Map<
+    string,
+    ReadonlyArray<TaskEntry> | null | Promise<ReadonlyArray<TaskEntry> | null>
+  >();
 
   // ------------------------------------------------------------------------
   // generateHookConfig — extracted from src/hookConfigurator.ts buildEntry
@@ -226,18 +235,32 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   async extractSubagentId(rawPayload: unknown): Promise<string | null> {
     const meta = parsePayloadForSubagent(rawPayload);
     if (!meta) return null;
-    let tasks = this.taskCache.get(meta.sessionId);
-    if (tasks === undefined) {
-      // First call for this session: load the transcript once.
+    let cached = this.taskCache.get(meta.sessionId);
+    if (cached === undefined) {
+      // Bug E fix: pre-cache the in-flight Promise BEFORE awaiting so a
+      // second concurrent call for the same sessionId awaits the same
+      // read instead of starting a second `readTaskEntries`. Once
+      // resolved, the cache entry is replaced with the value.
       const transcriptPath = this.resolveTranscriptPath(meta.sessionId, meta.cwd);
       if (!transcriptPath) {
         this.taskCache.set(meta.sessionId, null);
         return null;
       }
-      const loaded = await readTaskEntries(transcriptPath);
-      tasks = loaded.length > 0 ? loaded : null;
-      this.taskCache.set(meta.sessionId, tasks);
+      const loadPromise: Promise<ReadonlyArray<TaskEntry> | null> = readTaskEntries(transcriptPath)
+        .then((loaded) => {
+          const resolved = loaded.length > 0 ? loaded : null;
+          // Only overwrite if the cache entry is still the Promise — if a
+          // concurrent `clearSubagentCache` ran during the load, leave the
+          // cache clear so the next call re-reads.
+          if (this.taskCache.get(meta.sessionId) === loadPromise) {
+            this.taskCache.set(meta.sessionId, resolved);
+          }
+          return resolved;
+        });
+      this.taskCache.set(meta.sessionId, loadPromise);
+      cached = loadPromise;
     }
+    const tasks = await cached;
     if (!tasks) return null;
     const entry = findLatestTaskBefore(tasks, meta.timestamp);
     return entry?.description ?? null;
