@@ -24,7 +24,6 @@ import { ReviewOrchestrator, PanelGateway } from '../../src/reviewOrchestrator.j
 import { SnapshotStore } from '../../src/snapshotStore.js';
 import { Logger } from '../../src/logger.js';
 import {
-  asSessionId,
   AbsPath,
   FileReview,
   HunkStatus,
