@@ -144,6 +144,7 @@ export class SnapshotStore {
     if (resolved == null) return null;
     const session = this.getOrCreateSession(sessionId as SessionId, cwd, agentId);
     session.touched.add(resolved);
+    session.currentTurnTouched.add(resolved);
     // M9.6: same first-write-wins as captureOriginal.
     if (!session.subagentIdByPath.has(resolved)) {
       session.subagentIdByPath.set(resolved, subagentId);
@@ -194,6 +195,11 @@ export class SnapshotStore {
     if (session.currentTurnId == null) {
       session.currentTurnId = crypto.randomUUID();
       session.turnStartedAt = Date.now();
+      // Bug C fix: a fresh turn gets a fresh per-turn-touched set. The
+      // session-wide `touched` set persists across turns (carries every
+      // file ever edited in this session); `currentTurnTouched` scopes
+      // turn-stopped emission to files actually touched in THIS turn.
+      session.currentTurnTouched = new Set();
       return { turnId: session.currentTurnId, freshlyMinted: true };
     }
     return { turnId: session.currentTurnId, freshlyMinted: false };
@@ -259,6 +265,10 @@ export class SnapshotStore {
       turnStartedAt: input.turnStartedAt,
       lastTurnId: input.lastTurnId,
       subagentIdByPath: new Map(input.subagentIdByPath ?? []),
+      // Adopted sessions start with an empty per-turn touched set — the
+      // PRIOR turn's files are already captured in the event log; any
+      // new turn (Claude continuation) starts fresh.
+      currentTurnTouched: new Set(),
     };
     this.sessions.set(sid, session);
   }
@@ -279,6 +289,7 @@ export class SnapshotStore {
       turnStartedAt: null,
       lastTurnId: null,
       subagentIdByPath: new Map(),
+      currentTurnTouched: new Set(),
     };
     this.sessions.set(sessionId, fresh);
     return fresh;

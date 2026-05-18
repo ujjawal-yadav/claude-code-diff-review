@@ -59,6 +59,16 @@ export interface SessionData {
    * `recordTouched` when the caller passes a non-null subagentId.
    */
   subagentIdByPath: Map<AbsPath, string | null>;
+  /**
+   * Bug C fix (post-Wave-4): the subset of `touched` that was actually
+   * touched in the CURRENT turn (since the last `freshlyMinted` mint by
+   * `beginTurnIfNeeded`). Resets on each new turn. Used by
+   * `recordTurnStoppedEvent` to emit a turn-stopped event whose `files[]`
+   * is scoped to JUST this turn, not the cumulative session — without
+   * this, reconstruction sees later turn-stoppeds REPLACE earlier turns'
+   * file state and silently drops prior `hunk-decided` decisions.
+   */
+  currentTurnTouched: Set<AbsPath>;
 }
 
 export interface ConversationEntry {

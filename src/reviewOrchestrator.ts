@@ -570,9 +570,17 @@ export class ReviewOrchestrator {
       cwd: reconstructed.cwd,
       originals,
       subagentIdByPath,
-      // Re-open the prior turn — decisions append under the original turnId.
-      // (Architectural decision #8 in the plan.)
-      currentTurnId: reconstructed.turnId,
+      // Re-open the prior turn — user decisions during resume append events
+      // under the original turnId via the `currentTurnId ?? lastTurnId`
+      // fallback path in record*Event helpers. (Architectural decision #8.)
+      //
+      // Bug C fix: leave currentTurnId NULL so Claude's continuation edits
+      // mint a FRESH turn id (beginTurnIfNeeded → freshlyMinted=true).
+      // Setting currentTurnId to the prior id caused the next Stop to emit
+      // a SECOND turn-stopped event with the same turnId — reconstruction
+      // then REPLACED the prior turn's hunks + acceptedSet, silently
+      // dropping every hunk-decided that came in between.
+      currentTurnId: null,
       lastTurnId: reconstructed.turnId,
       turnStartedAt: null,
     });
@@ -788,6 +796,31 @@ export class ReviewOrchestrator {
       files.push(fr);
     }
 
+    // Bug B fix: when openReview fires for an already-tracked session
+    // (Claude continued editing in a resumed session, or fired multiple
+    // Stops in one logical turn), preserve hunk decisions where the new
+    // diff aligns with the prior hunks. Mirrors `reDiff`'s pattern
+    // (`hunksAlignedShallow` at the bottom of this file). Without this,
+    // every continuation Stop wipes the user's prior accept/reject in
+    // the live panel.
+    const priorSession = this.sessions.get(sid);
+    if (priorSession) {
+      for (const newFile of files) {
+        const priorFile = priorSession.files.find((p) => p.filePath === newFile.filePath);
+        if (!priorFile) continue;
+        newFile.hunks = newFile.hunks.map((h) => {
+          const priorH = priorFile.hunks[h.index];
+          if (priorH && hunksAlignedShallow(priorH, h)) {
+            const merged: HunkReview = { ...h, status: priorH.status };
+            if (priorH.decidedAt !== undefined) merged.decidedAt = priorH.decidedAt;
+            return merged;
+          }
+          return h;
+        });
+        newFile.status = recomputeFileStatus(newFile.hunks);
+      }
+    }
+
     const review: SessionReview = {
       agentId: sessionData.agentId,
       sessionId: sid,
@@ -806,6 +839,24 @@ export class ReviewOrchestrator {
     // No user-visible behaviour change vs v0.1.0; every subsequent
     // Accept/Reject is a set toggle from this baseline.
     this.indexHunkSets(sid, files, sessionData.originals);
+    // Bug B fix continued: if we preserved any prior decisions above,
+    // override the freshly-seeded acceptedSet so it reflects them.
+    // Rule: a hunk is in the set iff its status is NOT 'rejected'
+    // (pending and accepted both correspond to on-disk content).
+    if (priorSession) {
+      const perSession = this.hunkSets.get(sid);
+      if (perSession) {
+        for (const file of files) {
+          const hs = perSession.get(file.filePath);
+          if (!hs) continue;
+          const accepted = new Set<number>();
+          for (const h of file.hunks) {
+            if (h.status !== 'rejected') accepted.add(h.index);
+          }
+          hs.acceptedSet = accepted;
+        }
+      }
+    }
     await this.opts.panel.openOrFocus(review);
     this.opts.logger.info('orchestrator', 'review.opened', {
       sid,
@@ -1025,13 +1076,26 @@ export class ReviewOrchestrator {
       this.opts.logger.warn('orchestrator', 'history.turnStopped.no-turn', { sid });
       return;
     }
+    // Bug C fix: filter to ONLY the files touched in this turn. The
+    // session-wide `review.files` includes prior-turn files when the user
+    // resumed and Claude continued; emitting them in this turn's
+    // turn-stopped would cause reconstruction to REPLACE the prior turn's
+    // state on replay (turn-stopped's handler resets state.hunks +
+    // acceptedSet). For freshly-minted turns we have the per-turn set;
+    // when there is no per-turn set (e.g. legacy flow without
+    // `currentTurnTouched` populated), fall back to emitting everything
+    // — keeps the v0.1 single-turn case intact.
+    const turnTouched = sessionData?.currentTurnTouched;
+    const filesToEmit = (turnTouched && turnTouched.size > 0)
+      ? review.files.filter((f) => turnTouched.has(f.filePath))
+      : review.files;
     try {
       await history.recordTurnStopped({
         sessionId: sid,
         turnId,
         agentId: this.agentId,
         lastAssistantMessage,
-        files: review.files.map((f) => ({
+        files: filesToEmit.map((f) => ({
           relPath: f.relPath,
           afterContent: f.isBinary ? null : f.after,
           isNew: f.isNew,

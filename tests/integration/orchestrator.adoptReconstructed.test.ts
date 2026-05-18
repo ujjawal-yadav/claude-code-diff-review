@@ -228,7 +228,7 @@ describe('B0-7 / B0-8: round-trip equivalence — live → reconstruct → adopt
     expect(adoptedSession.files[0].hunks[1].status).toBe('pending');
   });
 
-  it('adopt sets currentTurnId on snapshot store so post-resume PreToolUse appends to the same turn', async () => {
+  it('adopt leaves currentTurnId null and stores prior turnId as lastTurnId — Claude continuation mints a fresh turn (Bug C)', async () => {
     const sid = 'rt-turn-id-' + Date.now();
     const before = 'a\nb\nc\n';
     const after = 'A\nb\nc\n';
@@ -253,14 +253,22 @@ describe('B0-7 / B0-8: round-trip equivalence — live → reconstruct → adopt
     });
     fresh.adoptReconstructed(recon!);
 
-    // SnapshotStore should now expose the adopted session with the original
-    // turnId — subsequent beginTurnIfNeeded must NOT mint a new one.
+    // Bug C fix: after adopt, `currentTurnId` is null and `lastTurnId`
+    // carries the original turn id. User decisions during resume attach
+    // to the original turn via the `currentTurnId ?? lastTurnId` fallback
+    // path (already used by recordHunkDecisionEvent / recordUndoEvent /
+    // recordSnapshotRevertEvent). Claude's continuation edits mint a
+    // FRESH turn id — this prevents the second-turn-stopped collision
+    // that previously dropped earlier hunk-decided events during replay.
     const ssData = store.get(sid);
     expect(ssData).toBeDefined();
-    expect(ssData!.currentTurnId).toBe(recon!.turnId);
+    expect(ssData!.currentTurnId).toBeNull();
+    expect(ssData!.lastTurnId).toBe(recon!.turnId);
+
+    // Next PreToolUse mints a brand-new turn id (the continuation turn).
     const nextTurn = store.beginTurnIfNeeded(sid, CWD_ABS);
-    expect(nextTurn.freshlyMinted).toBe(false);
-    expect(nextTurn.turnId).toBe(recon!.turnId);
+    expect(nextTurn.freshlyMinted).toBe(true);
+    expect(nextTurn.turnId).not.toBe(recon!.turnId);
   });
 });
 
