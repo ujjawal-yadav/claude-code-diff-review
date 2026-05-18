@@ -145,12 +145,37 @@ describe('ClaudeCodeAdapter — generateHookConfig', () => {
   });
 });
 
-describe('ClaudeCodeAdapter — placeholder hooks (M9.5/9.6)', () => {
-  it('resolveTranscriptPath returns null until M9.5', () => {
-    expect(adapter.resolveTranscriptPath('sess-001', '/work')).toBeNull();
+describe('ClaudeCodeAdapter — resolveTranscriptPath (M9.5)', () => {
+  it('returns a path under ~/.claude/projects/<encoded>/<sessionId>.jsonl', () => {
+    const resolved = adapter.resolveTranscriptPath('sess-001', '/work/proj');
+    expect(resolved).not.toBeNull();
+    expect(resolved).toMatch(/[\\/]\.claude[\\/]projects[\\/]/);
+    expect(resolved).toMatch(/sess-001\.jsonl$/);
   });
 
-  it('extractSubagentId returns null until M9.6', () => {
+  it('encodes cwd by stripping Windows drive letter and replacing separators with -', () => {
+    // The encoding strategy is platform-agnostic at the string level.
+    const winResolved = adapter.resolveTranscriptPath('sid', 'C:\\Users\\foo\\proj');
+    expect(winResolved).not.toBeNull();
+    expect(winResolved).toMatch(/-Users-foo-proj/);
+    const posixResolved = adapter.resolveTranscriptPath('sid', '/Users/foo/proj');
+    expect(posixResolved).not.toBeNull();
+    expect(posixResolved).toMatch(/-Users-foo-proj/);
+  });
+
+  it('refuses path-traversal in sessionId', () => {
+    expect(adapter.resolveTranscriptPath('../escape', '/work')).toBeNull();
+    expect(adapter.resolveTranscriptPath('../../escape', '/work')).toBeNull();
+  });
+
+  it('returns null on empty inputs', () => {
+    expect(adapter.resolveTranscriptPath('', '/work')).toBeNull();
+    expect(adapter.resolveTranscriptPath('sid', '')).toBeNull();
+  });
+});
+
+describe('ClaudeCodeAdapter — extractSubagentId (M9.6 placeholder)', () => {
+  it('returns null until M9.6 lands', () => {
     expect(adapter.extractSubagentId(validPreEdit)).toBeNull();
   });
 });

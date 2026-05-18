@@ -101,8 +101,13 @@ describe('anthropicClient — pure helpers', () => {
   });
 
   it('exposes a versioned system prompt', () => {
-    expect(HUNK_REVIEW_PROMPT_VERSION).toBe('v1');
+    // M9.5 — bumped to v2 with transcript-context awareness.
+    expect(HUNK_REVIEW_PROMPT_VERSION).toBe('v2');
     expect(HUNK_REVIEW_SYSTEM_PROMPT.length).toBeGreaterThan(50);
+    // v2 must still preserve v1's hunk-focused character.
+    expect(HUNK_REVIEW_SYSTEM_PROMPT).toMatch(/hunk/i);
+    // v2 introduces awareness of transcript context.
+    expect(HUNK_REVIEW_SYSTEM_PROMPT).toMatch(/transcript/i);
   });
 });
 

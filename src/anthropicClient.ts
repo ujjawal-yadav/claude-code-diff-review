@@ -26,15 +26,17 @@ import type { ResolvedCredential } from './credentialResolver.js';
  * cleanly and `onError` fires with `kind: 'cancelled'`.
  */
 
-export const HUNK_REVIEW_PROMPT_VERSION = 'v1';
+export const HUNK_REVIEW_PROMPT_VERSION = 'v2';
 
 export const HUNK_REVIEW_SYSTEM_PROMPT = `You are an expert code reviewer helping a developer decide whether to accept or reject a single diff hunk produced by Claude Code.
 
 Rules:
 - Be concise, technical, and decisive.
-- Focus only on the hunk shown; do not speculate about code outside the hunk.
+- Focus on the hunk shown; do not speculate about code outside it.
 - When asked, give a clear recommendation ("Accept", "Reject", or "Investigate further") with one short justification.
-- Flag any obvious correctness, security, or performance regressions.`;
+- Flag any obvious correctness, security, or performance regressions.
+
+When transcript context is provided (the user's original prompt for this turn and Claude's surrounding tool calls), cite it specifically when answering "why did Claude do this?" questions. If no transcript is provided, answer from the hunk alone — never invent reasoning Claude didn't produce. If the transcript context is empty and the user's question would benefit from it, say so briefly.`;
 
 export interface StreamRequest {
   hunkDiff: string;

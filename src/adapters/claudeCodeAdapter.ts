@@ -1,3 +1,6 @@
+import * as os from 'node:os';
+import * as path from 'node:path';
+
 import {
   PreToolUsePayload,
   PostToolUsePayload,
@@ -155,9 +158,36 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   // Placeholder hooks for Waves 3 (history) and 4 (sub-agent attribution)
   // ------------------------------------------------------------------------
 
-  resolveTranscriptPath(_sessionId: string, _cwd: string): string | null {
-    // TODO M9.5 — resolve `~/.claude/projects/<slug>/<sessionId>.jsonl`.
-    return null;
+  /**
+   * Resolve Claude Code's session transcript path.
+   *
+   * Layout: `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` where the
+   * encoding strips a Windows drive letter (`C:` → ``) and replaces
+   * `\` / `/` with `-`. Matches Claude Code's own slug computation.
+   *
+   * Security: `sessionId` and `cwd` arrive from untrusted hook payloads.
+   * After `path.resolve`, the result MUST stay under the projects root —
+   * otherwise we refuse with `null`. The reader treats `null` as "no
+   * transcript available", which gracefully degrades to hunk-only chat
+   * and null sub-agent attribution.
+   */
+  resolveTranscriptPath(sessionId: string, cwd: string): string | null {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
+    if (typeof cwd !== 'string' || cwd.length === 0) return null;
+    // Reject sessionIds that contain path separators or traversal segments
+    // BEFORE path.join normalises them away. `../escape` would otherwise
+    // collapse the parent directory and resolve INSIDE projects/ but with
+    // a different basename — still within the root, but writing to the
+    // wrong filename. Disallow the whole class.
+    if (/[\\/]/.test(sessionId) || sessionId.includes('..')) return null;
+    const encoded = cwd.replace(/^[A-Za-z]:/, '').replace(/[\\/]/g, '-');
+    const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
+    const candidate = path.join(projectsRoot, encoded, `${sessionId}.jsonl`);
+    const resolved = path.resolve(candidate);
+    const projectsRootResolved = path.resolve(projectsRoot);
+    const rel = path.relative(projectsRootResolved, resolved);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+    return resolved;
   }
 
   extractSubagentId(_rawPayload: unknown): string | null {

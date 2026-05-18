@@ -187,6 +187,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   panel.setOrchestrator(orchestrator);
 
+  // Adapter is needed for hook dispatch AND for chatService's transcript
+  // resolution, so hoist it above both. When a second adapter lands (M9.4b),
+  // the route-level discriminator selects which entry to use.
+  const claudeAdapter = agentAdapters.get('claude-code')!;
+
   const anthropicClient = new AnthropicClient({
     resolveCredential: () => resolveCredential(
       { getOAuthToken: () => secrets.getOAuthToken(), getApiKey: () => secrets.getApiKey() },
@@ -195,7 +200,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     model:     config.get<string>('chatModel')      ?? 'claude-haiku-4-5-20251001',
     maxTokens: config.get<number>('chatMaxTokens')  ?? 2048,
   });
-  const chatService = new ChatService({ client: anthropicClient, logger, orchestrator, panel });
+  const transcriptContextEnabled = config.get<boolean>('chat.transcriptContext') ?? true;
+  const chatService = new ChatService({
+    client: anthropicClient,
+    logger,
+    orchestrator,
+    panel,
+    adapter: claudeAdapter,
+    transcriptContextEnabled,
+  });
   panel.setChatService(chatService);
 
   const statusBar = new StatusBarController(context, 'claudeReview.openPanel');
@@ -213,10 +226,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // PreToolUse / PostToolUse run after server-side adapter validation.
   // We dispatch through the adapter registry here as well so the agentId
-  // tag propagates onto SessionData (and ultimately SessionReview). When
-  // a second adapter lands (M9.4b), the only change here is to pick the
-  // adapter based on a route-level discriminator.
-  const claudeAdapter = agentAdapters.get('claude-code')!;
+  // tag propagates onto SessionData (and ultimately SessionReview).
+  // `claudeAdapter` is hoisted above (chatService also needs it for
+  // transcript path resolution).
   const onPreToolUse = async (p: PreToolUsePayload) => {
     const norm = claudeAdapter.parsePreToolUse(p);
     if (!norm || !norm.filePath) return;

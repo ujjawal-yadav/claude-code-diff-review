@@ -1,6 +1,12 @@
+import type { AgentAdapter } from './adapters/agentAdapter.js';
 import { AnthropicClient, ChatError } from './anthropicClient.js';
 import { Logger } from './logger.js';
 import { ReviewOrchestrator } from './reviewOrchestrator.js';
+import {
+  readTranscriptWindow,
+  type TranscriptWindow,
+  type ToolCallSummary,
+} from './transcript/transcriptReader.js';
 import { ConversationEntry, SessionId, TokenUsage } from './types.js';
 
 /**
@@ -32,6 +38,18 @@ export interface ChatServiceDeps {
   logger: Logger;
   orchestrator: ReviewOrchestrator;
   panel: ChatGateway;
+  /**
+   * M9.5 — adapter for resolving the agent's session transcript path.
+   * Optional so existing tests can construct ChatService without wiring it;
+   * when absent, transcript injection is silently skipped.
+   */
+  adapter?: AgentAdapter;
+  /**
+   * M9.5 — gate for transcript context injection (config:
+   * `claudeReview.chat.transcriptContext`). Defaults to false when absent
+   * so test harnesses without an adapter never attempt transcript reads.
+   */
+  transcriptContextEnabled?: boolean;
 }
 
 export interface ChatStartArgs {
@@ -118,8 +136,28 @@ export class ChatService {
       this.deps.logger.warn('chat', 'error', { sid: sessionId, chatId, kind: err.kind });
     };
 
+    // M9.5: prepend transcript context to the user message when the config
+    // is enabled, an adapter is wired, and the transcript resolves. Any
+    // failure silently falls back to hunk-only — never blocks the chat.
+    let userMessage = args.message;
+    if (this.deps.transcriptContextEnabled && this.deps.adapter) {
+      try {
+        const transcriptPath = this.deps.adapter.resolveTranscriptPath(args.sessionId, review.cwd);
+        if (transcriptPath) {
+          const window = await readTranscriptWindow(transcriptPath, {
+            filePath: args.filePath,
+            logger: this.deps.logger,
+          });
+          userMessage = composeUserMessageWithTranscript(window, args.message);
+        }
+      } catch (err) {
+        this.deps.logger.debug('chat', 'transcript.read.failed', { err: String(err) });
+        // fall through with original args.message
+      }
+    }
+
     await this.deps.client.streamChat(
-      { hunkDiff, history, userMessage: args.message },
+      { hunkDiff, history, userMessage },
       { onDelta, onDone, onError },
       controller.signal,
     );
@@ -181,6 +219,60 @@ function convKey(k: ConvKey): string {
 
 function renderHunkDiff(relPath: string, header: string, lines: string[]): string {
   return [`--- a/${relPath}`, `+++ b/${relPath}`, header, ...lines].join('\n');
+}
+
+/**
+ * M9.5: compose the chat user message with a transcript context block.
+ * Pure function — no I/O. Returns the original question unchanged when the
+ * window carries no useful context (no user prompt, no surrounding tool
+ * calls, no assistant thinking) — keeps the prompt clean for hunk-only
+ * sessions where the transcript exists but doesn't reference this file.
+ */
+export function composeUserMessageWithTranscript(
+  window: TranscriptWindow,
+  userQuestion: string,
+): string {
+  const hasContext =
+    window.userPrompt !== null ||
+    window.precedingToolCalls.length > 0 ||
+    window.followingToolCalls.length > 0 ||
+    window.assistantThinking !== null;
+  if (!hasContext) return userQuestion;
+
+  const sections: string[] = [];
+  sections.push('<transcript-context>');
+  if (window.userPrompt) {
+    sections.push('User\'s original prompt for this turn:');
+    sections.push('"""');
+    sections.push(window.userPrompt);
+    sections.push('"""');
+    sections.push('');
+  }
+  if (window.precedingToolCalls.length > 0) {
+    sections.push('Claude\'s tool calls before this hunk:');
+    sections.push(renderToolCallList(window.precedingToolCalls));
+    sections.push('');
+  }
+  if (window.followingToolCalls.length > 0) {
+    sections.push('Claude\'s tool calls after this hunk:');
+    sections.push(renderToolCallList(window.followingToolCalls));
+    sections.push('');
+  }
+  if (window.assistantThinking) {
+    sections.push('Claude\'s thinking (if any):');
+    sections.push('"""');
+    sections.push(window.assistantThinking);
+    sections.push('"""');
+    sections.push('');
+  }
+  sections.push('</transcript-context>');
+  sections.push('');
+  sections.push(userQuestion);
+  return sections.join('\n');
+}
+
+function renderToolCallList(calls: ToolCallSummary[]): string {
+  return calls.map((c) => `- ${c.toolName}: ${c.inputSummary}`).join('\n');
 }
 
 /** Exported for tests. */
