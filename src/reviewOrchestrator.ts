@@ -1151,60 +1151,67 @@ export class ReviewOrchestrator {
   }
 
   private async reDiff(sid: SessionId, absPath: AbsPath): Promise<void> {
-    const review = this.sessions.get(sid);
-    if (!review) return;
-    const file = this.getFile(sid, absPath);
-    if (!file) return;
-    let after: string;
-    try {
-      after = await this.read(absPath);
-    } catch {
-      return;
-    }
-    const diff = computeDiff(absPath, file.before, after);
-    const refreshed = toFileReview(diff, review.cwd, false);
-    // Preserve human decisions where index alignment still applies.
-    refreshed.hunks = refreshed.hunks.map((h) => {
-      const prior = file.hunks[h.index];
-      if (prior && hunksAlignedShallow(prior, h)) {
-        const merged: HunkReview = { ...h, status: prior.status };
-        if (prior.decidedAt != null) merged.decidedAt = prior.decidedAt;
-        return merged;
+    // β.0 (10.1.9): gate through the per-file mutex so the swap of
+    // `file.hunks` + `hunkSets` cannot race with a concurrent hunk action,
+    // drift-classification read, or undo. Pre-β.0 this ran unprotected —
+    // benign while drift was never observed externally, but β.0's
+    // reconstruction reads file.after and would see torn state.
+    await this.lockFile(absPath, async () => {
+      const review = this.sessions.get(sid);
+      if (!review) return;
+      const file = this.getFile(sid, absPath);
+      if (!file) return;
+      let after: string;
+      try {
+        after = await this.read(absPath);
+      } catch {
+        return;
       }
-      return h;
-    });
-    // Drop fuzz-failed-revert when we re-diff: a successful re-diff makes
-    // that warning stale (the file may have been hand-fixed).
-    refreshed.warnings = uniqueWarnings([
-      ...file.warnings.filter((w) => w !== 'fuzz-failed-revert'),
-      'external-edit',
-    ]);
-    Object.assign(file, refreshed);
-    file.status = recomputeFileStatus(file.hunks);
+      const diff = computeDiff(absPath, file.before, after);
+      const refreshed = toFileReview(diff, review.cwd, false);
+      // Preserve human decisions where index alignment still applies.
+      refreshed.hunks = refreshed.hunks.map((h) => {
+        const prior = file.hunks[h.index];
+        if (prior && hunksAlignedShallow(prior, h)) {
+          const merged: HunkReview = { ...h, status: prior.status };
+          if (prior.decidedAt != null) merged.decidedAt = prior.decidedAt;
+          return merged;
+        }
+        return h;
+      });
+      // Drop fuzz-failed-revert when we re-diff: a successful re-diff makes
+      // that warning stale (the file may have been hand-fixed).
+      refreshed.warnings = uniqueWarnings([
+        ...file.warnings.filter((w) => w !== 'fuzz-failed-revert'),
+        'external-edit',
+      ]);
+      Object.assign(file, refreshed);
+      file.status = recomputeFileStatus(file.hunks);
 
-    // Phase α Track 6: rebuild HunkSetState from the refreshed hunks so the
-    // set stays consistent with the new hunk indices. `acceptedSet` is
-    // derived from preserved hunk.status. New hunks (no prior alignment)
-    // arrive as 'pending' and start outside the set.
-    const newAllHunks: StructuredHunk[] = file.hunks.map(hunkAsStructured);
-    const newAccepted = new Set<number>();
-    for (const h of file.hunks) {
-      if (h.status === 'accepted') newAccepted.add(h.index);
-    }
-    let perSession = this.hunkSets.get(sid);
-    if (!perSession) {
-      perSession = new Map();
-      this.hunkSets.set(sid, perSession);
-    }
-    perSession.set(absPath, {
-      filePath: absPath,
-      originalSnapshot: file.before,
-      allHunks: newAllHunks,
-      acceptedSet: newAccepted,
-    });
+      // Phase α Track 6: rebuild HunkSetState from the refreshed hunks so the
+      // set stays consistent with the new hunk indices. `acceptedSet` is
+      // derived from preserved hunk.status. New hunks (no prior alignment)
+      // arrive as 'pending' and start outside the set.
+      const newAllHunks: StructuredHunk[] = file.hunks.map(hunkAsStructured);
+      const newAccepted = new Set<number>();
+      for (const h of file.hunks) {
+        if (h.status === 'accepted') newAccepted.add(h.index);
+      }
+      let perSession = this.hunkSets.get(sid);
+      if (!perSession) {
+        perSession = new Map();
+        this.hunkSets.set(sid, perSession);
+      }
+      perSession.set(absPath, {
+        filePath: absPath,
+        originalSnapshot: file.before,
+        allHunks: newAllHunks,
+        acceptedSet: newAccepted,
+      });
 
-    this.opts.panel.postFileUpdated(absPath, file);
-    this.notifyChange();
+      this.opts.panel.postFileUpdated(absPath, file);
+      this.notifyChange();
+    });
   }
 
   private maybeComplete(review: SessionReview): void {
