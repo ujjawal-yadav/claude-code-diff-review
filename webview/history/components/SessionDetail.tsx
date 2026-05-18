@@ -6,6 +6,11 @@ interface SessionDetailProps {
   session: SessionIndexEntry;
   events: HistoryEvent[] | null;
   loading: boolean;
+  /** β.0 (10.1.8): undefined when no action is in flight for this session. */
+  inflight?: 'resume' | 'rollback' | 'delete' | undefined;
+  onResume?: (sessionId: string) => void;
+  onRollback?: (sessionId: string) => void;
+  onDelete?: (sessionId: string) => void;
 }
 
 /** A turn aggregated for display. */
@@ -18,20 +23,77 @@ interface TurnSummary {
   aborted: boolean;
 }
 
-export function SessionDetail({ session, events, loading }: SessionDetailProps): JSX.Element {
+export function SessionDetail({
+  session,
+  events,
+  loading,
+  inflight,
+  onResume,
+  onRollback,
+  onDelete,
+}: SessionDetailProps): JSX.Element {
   const turns = useMemo(() => (events ? aggregateTurns(events) : []), [events]);
+  const anyInflight = inflight !== undefined;
+  const hasPending = (session.pendingHunkCount ?? 0) > 0;
+  const sid = session.sessionId;
 
   return (
     <div>
       <h2 style={styles.h2}>
         <code>{session.sessionId}</code>{' '}
         <span style={styles.subtle}>· {session.agentId} · {session.status}</span>
+        {hasPending && (
+          <span style={styles.pendingBadge} title={`${session.pendingHunkCount} hunks pending review`}>
+            {session.pendingHunkCount} pending
+          </span>
+        )}
       </h2>
       <div style={styles.subtle}>
         Started {new Date(session.startedAt).toLocaleString()} · Last event {new Date(session.lastEventAt).toLocaleString()}
       </div>
       {session.lastMessage && (
         <blockquote style={styles.quote}>{session.lastMessage}</blockquote>
+      )}
+
+      {(onResume || onRollback || onDelete) && (
+        <div style={styles.actions} role="group" aria-label="Session actions">
+          {onResume && (
+            <button
+              type="button"
+              style={styles.btnPrimary}
+              disabled={anyInflight}
+              onClick={() => onResume(sid)}
+              aria-label={`Resume review for session ${sid.slice(0, 8)}`}
+              title="Open the review panel for this session (resumes any pending decisions)"
+            >
+              {inflight === 'resume' ? '… Resuming' : '▶ Resume Review'}
+            </button>
+          )}
+          {onRollback && (
+            <button
+              type="button"
+              style={styles.btnDestructive}
+              disabled={anyInflight}
+              onClick={() => onRollback(sid)}
+              aria-label={`Rollback every file in session ${sid.slice(0, 8)} to its pre-edit content`}
+              title="Restore every file in this turn to its pre-edit content"
+            >
+              {inflight === 'rollback' ? '… Rolling back' : '↶ Rollback this turn'}
+            </button>
+          )}
+          {onDelete && (
+            <button
+              type="button"
+              style={styles.btnDestructive}
+              disabled={anyInflight}
+              onClick={() => onDelete(sid)}
+              aria-label={`Delete session ${sid.slice(0, 8)} from history`}
+              title="Permanently remove this session from the event log"
+            >
+              {inflight === 'delete' ? '… Deleting' : '🗑 Delete from history'}
+            </button>
+          )}
+        </div>
       )}
 
       <h3 style={styles.h3}>Turns ({session.turnCount})</h3>
@@ -194,4 +256,37 @@ const styles: Record<string, React.CSSProperties> = {
   acceptBadge: { color: 'var(--vscode-charts-green)', marginLeft: '0.4rem' },
   rejectBadge: { color: 'var(--vscode-charts-red)', marginLeft: '0.4rem' },
   revertBadge: { color: 'var(--vscode-charts-orange)', marginLeft: '0.4rem', fontSize: '0.85em' },
+  pendingBadge: {
+    marginLeft: '0.5rem',
+    padding: '0 0.4rem',
+    borderRadius: '3px',
+    background: 'var(--vscode-inputValidation-warningBackground)',
+    color: 'var(--vscode-charts-orange)',
+    fontSize: '0.75em',
+    fontWeight: 600,
+  },
+  actions: {
+    display: 'flex',
+    gap: '0.4rem',
+    margin: '0.6rem 0',
+    flexWrap: 'wrap',
+  },
+  btnPrimary: {
+    cursor: 'pointer',
+    padding: '4px 10px',
+    border: '1px solid var(--vscode-button-border, transparent)',
+    borderRadius: '3px',
+    background: 'var(--vscode-button-background)',
+    color: 'var(--vscode-button-foreground)',
+    fontSize: '12px',
+  },
+  btnDestructive: {
+    cursor: 'pointer',
+    padding: '4px 10px',
+    border: '1px solid var(--vscode-errorForeground, #f14c4c)',
+    borderRadius: '3px',
+    background: 'transparent',
+    color: 'var(--vscode-errorForeground, #f14c4c)',
+    fontSize: '12px',
+  },
 };

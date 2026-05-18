@@ -629,6 +629,64 @@ export class ReviewOrchestrator {
     return review;
   }
 
+  /**
+   * β.0 (10.1.8b): roll back every file in a reconstructed turn to its
+   * pre-edit content. Disk-only restore (decision #11): writes through the
+   * per-file mutex and emits `file-snapshot-reverted` per file. Does NOT
+   * touch in-memory session state; if the session is also live in the
+   * panel, the natural `onDidSaveTextDocument` re-diff path picks up the
+   * change. The History panel's Rollback button is the sole caller today.
+   *
+   * Caller is responsible for confirming the destructive action — this
+   * method assumes consent.
+   */
+  async rollbackTurnFromHistory(
+    reconstructed: ReconstructedSessionReview,
+  ): Promise<{ filesRestored: number; failed: number }> {
+    let restored = 0;
+    let failed = 0;
+    for (const f of reconstructed.files) {
+      if (f.isDeleted) {
+        // A file Claude created can be unmade by deleting it. Out of scope
+        // for v0.2 — defer to a follow-up (would need an `unlinkFile` write).
+        this.opts.logger.debug('orchestrator', 'rollback.skip-isnew', { rel: f.relPath });
+        continue;
+      }
+      const abs = asAbsPath(f.filePath);
+      await this.lockFile(abs, async () => {
+        try {
+          await this.write(abs, f.before);
+          restored++;
+          // Emit a file-snapshot-reverted event so the next reconstruction
+          // sees the rollback as a first-class decision (and the pending
+          // count drops to zero for this file).
+          const history = this.opts.history;
+          if (history) {
+            void history.recordFileSnapshotReverted({
+              sessionId: reconstructed.sessionId,
+              turnId: reconstructed.turnId,
+              agentId: reconstructed.agentId,
+              relPath: f.relPath,
+              postContent: f.before,
+            });
+          }
+        } catch (err) {
+          failed++;
+          this.opts.logger.warn('orchestrator', 'rollback.write-failed', {
+            abs, err: String(err),
+          });
+        }
+      });
+    }
+    this.opts.logger.info('orchestrator', 'rollback.applied', {
+      sid: reconstructed.sessionId,
+      turnId: reconstructed.turnId,
+      restored, failed,
+    });
+    this.notifyChange();
+    return { filesRestored: restored, failed };
+  }
+
   // -- denormalised index maintenance ----------------------------------------
 
   private indexFiles(sid: SessionId, files: FileReview[]): void {

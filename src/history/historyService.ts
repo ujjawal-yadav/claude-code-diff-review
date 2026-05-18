@@ -642,6 +642,72 @@ export class HistoryService {
     return path.join(cwd, relPath);
   }
 
+  /**
+   * β.0 (10.1.8a): permanently delete a session from the event log.
+   * Removes its segments and sweeps blobs that were *only* referenced by it.
+   *
+   * Cross-session safety
+   * --------------------
+   * The blob store is content-addressed; multiple sessions can reference
+   * the same blob (e.g., identical `before` snapshots). We MUST NOT delete
+   * a blob still referenced by another session, so the implementation scans
+   * the surviving sessions' refs first and only sweeps blobs whose sole
+   * referent was the doomed session.
+   *
+   * Best-effort on failure: partial state (segments gone, index unupdated)
+   * could occur if the process crashes mid-operation. The next activation's
+   * retention sweeper would notice the dangling index entry on subsequent
+   * boot and clean up.
+   */
+  async deleteSession(sessionId: string): Promise<{ blobsDeleted: number }> {
+    if (!this.opts.enabled) return { blobsDeleted: 0 };
+
+    // 1. Collect blob refs from the session being deleted.
+    const doomedBlobs = new Set<string>();
+    for await (const ev of this.reader.readSession(sessionId)) {
+      collectBlobRefs(ev, doomedBlobs);
+    }
+
+    // 2. Collect blob refs from every other session (must scan BEFORE
+    //    deleting segments — otherwise we'd lose track of shared refs).
+    const otherSessions = (await this.listSessions()).filter(
+      (s) => s.sessionId !== sessionId,
+    );
+    const liveBlobs = new Set<string>();
+    for (const s of otherSessions) {
+      for await (const ev of this.reader.readSession(s.sessionId)) {
+        collectBlobRefs(ev, liveBlobs);
+      }
+    }
+
+    // 3. Delete this session's segments + drop the writer state.
+    const writer = this.getWriter(sessionId);
+    const segments = await writer.listSegments(sessionId);
+    for (const seg of segments) {
+      await fs.unlink(seg).catch(() => undefined);
+    }
+    this.writers.delete(sessionId);
+    this.liveSessions.delete(sessionId);
+
+    // 4. Sweep blobs whose sole referent was the deleted session.
+    let blobsDeleted = 0;
+    for (const sha of doomedBlobs) {
+      if (!liveBlobs.has(sha)) {
+        await this.blobs.delete(sha);
+        blobsDeleted++;
+      }
+    }
+
+    // 5. Drop from index + invalidate the aggregate cache so the status
+    //    bar / openPanel probe pick up the change on the next call.
+    await this.index.update((cur) => {
+      cur.sessions = cur.sessions.filter((s) => s.sessionId !== sessionId);
+    });
+    this.pendingSummaryCache = null;
+
+    return { blobsDeleted };
+  }
+
   // -- retention -----------------------------------------------------------
 
   /**

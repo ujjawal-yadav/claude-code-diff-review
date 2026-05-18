@@ -130,23 +130,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }, sweepIntervalMs);
     context.subscriptions.push({ dispose: () => clearInterval(sweepTimer) });
 
-    // M9.2.11: crash recovery. On activation, if any session in the log has
-    // an open turn within the last 7 days, surface a "Resume review" toast.
+    // M9.2.11: crash recovery toast.
+    //
+    // @deprecated v0.3 — superseded by `PendingStatusBar` (β.0 10.1.6) which
+    // covers a strict superset (any recoverable session with pending hunks,
+    // not just sessions with an open turn). The toast remains ON by default
+    // for one release so existing v0.2 users aren't surprised — gated by
+    // `claudeReview.crashRecoveryToast.enabled` (default true). Switch the
+    // default to false in v0.4 once status-bar parity is confirmed in the
+    // wild; remove the toast entirely in v0.5.
+    //
     // Fire-and-forget; never blocks activation.
-    void history.findResumeCandidates({ withinMs: 7 * 24 * 60 * 60 * 1000 })
-      .then(async (candidates) => {
-        const openOnes = candidates.filter((c) => c.hasOpenTurn);
-        if (openOnes.length === 0) return;
-        const choice = await vscode.window.showInformationMessage(
-          `Claude Code Review: ${openOnes.length} session(s) ended without a clean stop. Open the History panel to inspect?`,
-          'Open History',
-          'Dismiss',
-        );
-        if (choice === 'Open History') {
-          await vscode.commands.executeCommand('claudeReview.openHistory').then(undefined, () => undefined);
-        }
-      })
-      .catch((err) => logger?.warn('history', 'recovery.probe.error', { err: String(err) }));
+    const toastEnabled = vscode.workspace
+      .getConfiguration('claudeReview')
+      .get<boolean>('crashRecoveryToast.enabled', true);
+    if (toastEnabled) {
+      void history.findResumeCandidates({ withinMs: 7 * 24 * 60 * 60 * 1000 })
+        .then(async (candidates) => {
+          const openOnes = candidates.filter((c) => c.hasOpenTurn);
+          if (openOnes.length === 0) return;
+          const choice = await vscode.window.showInformationMessage(
+            `Claude Code Review: ${openOnes.length} session(s) ended without a clean stop. Open the History panel to inspect?`,
+            'Open History',
+            'Dismiss',
+          );
+          if (choice === 'Open History') {
+            await vscode.commands.executeCommand('claudeReview.openHistory').then(undefined, () => undefined);
+          }
+        })
+        .catch((err) => logger?.warn('history', 'recovery.probe.error', { err: String(err) }));
+    }
 
     // M9.2.12: one-time `.gitignore` prompt. On first event-log write we
     // detect a workspace `.gitignore` and offer to add the history path.
@@ -445,7 +458,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       if (!historyPanel) {
-        historyPanel = new HistoryPanelManager({ context, logger: logger!, history });
+        historyPanel = new HistoryPanelManager({
+          context,
+          logger: logger!,
+          history,
+          orchestrator,
+          reviewPanel: panel,
+          ...(pendingStatusBar ? { pendingStatusBar } : {}),
+        });
       }
       await historyPanel.openOrFocus();
     }),

@@ -13,6 +13,14 @@ export function App(): JSX.Element {
   const [events, setEvents] = useState<HistoryEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
+  /**
+   * β.0 (10.1.8): when an action (resume / rollback / delete) is in flight,
+   * the SessionDetail's buttons disable until the host echoes back. Keyed
+   * by sessionId so concurrent actions on different sessions don't clash
+   * (rare today; future-proofing for richer flows).
+   */
+  const [inflight, setInflight] = useState<Record<string, 'resume' | 'rollback' | 'delete' | undefined>>({});
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     const handler = (e: MessageEvent<unknown>) => {
@@ -29,6 +37,12 @@ export function App(): JSX.Element {
             setLoading(true);
             vscode.postMessage({ type: 'load-session', sessionId: newest.sessionId });
           }
+          // After a delete, the deleted session may have been the selected
+          // one. Clear selection if it's no longer in the list.
+          if (selectedId && !msg.sessions.some((s) => s.sessionId === selectedId)) {
+            setSelectedId(null);
+            setEvents(null);
+          }
           return;
         case 'session-loaded':
           if (msg.sessionId === selectedId) {
@@ -40,12 +54,42 @@ export function App(): JSX.Element {
           setError(msg.message);
           setLoading(false);
           return;
+        case 'session-action-result':
+          setInflight((prev) => {
+            const next = { ...prev };
+            delete next[msg.sessionId];
+            return next;
+          });
+          if (!msg.ok) {
+            setActionError(
+              `${msg.action} failed${msg.error ? `: ${msg.error}` : ''}`,
+            );
+          } else {
+            setActionError(null);
+          }
+          return;
       }
     };
     window.addEventListener('message', handler);
     vscode.postMessage({ type: 'ready' });
     return () => window.removeEventListener('message', handler);
   }, [selectedId]);
+
+  const onResume = (sid: string): void => {
+    setActionError(null);
+    setInflight((prev) => ({ ...prev, [sid]: 'resume' }));
+    vscode.postMessage({ type: 'resume-session', sessionId: sid });
+  };
+  const onRollback = (sid: string): void => {
+    setActionError(null);
+    setInflight((prev) => ({ ...prev, [sid]: 'rollback' }));
+    vscode.postMessage({ type: 'rollback-turn', sessionId: sid });
+  };
+  const onDelete = (sid: string): void => {
+    setActionError(null);
+    setInflight((prev) => ({ ...prev, [sid]: 'delete' }));
+    vscode.postMessage({ type: 'delete-session', sessionId: sid });
+  };
 
   const selected = useMemo(
     () => sessions?.find((s) => s.sessionId === selectedId) ?? null,
@@ -70,6 +114,7 @@ export function App(): JSX.Element {
         </span>
       </header>
       {error && <div style={styles.error}>{error}</div>}
+      {actionError && <div style={styles.error}>{actionError}</div>}
       <div style={styles.body}>
         <aside style={styles.aside}>
           <SessionList sessions={sessions} selectedId={selectedId} onSelect={onSelect} />
@@ -84,7 +129,15 @@ export function App(): JSX.Element {
                   : 'Select a session to inspect its turns.'}
             </p>
           ) : (
-            <SessionDetail session={selected} events={events} loading={loading} />
+            <SessionDetail
+              session={selected}
+              events={events}
+              loading={loading}
+              inflight={inflight[selected.sessionId]}
+              onResume={onResume}
+              onRollback={onRollback}
+              onDelete={onDelete}
+            />
           )}
         </main>
       </div>

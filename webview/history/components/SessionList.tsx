@@ -37,6 +37,17 @@ export function SessionList({ sessions, selectedId, onSelect }: SessionListProps
                 <span>{s.turnCount} turn{s.turnCount === 1 ? '' : 's'}</span>
                 <span>·</span>
                 <span title={new Date(s.lastEventAt).toLocaleString()}>{relative(s.lastEventAt)}</span>
+                {(s.pendingHunkCount ?? 0) > 0 && (
+                  <>
+                    <span>·</span>
+                    <span
+                      style={styles.pendingBadge}
+                      title={`${s.pendingHunkCount} hunks still pending review`}
+                    >
+                      {s.pendingHunkCount} pending
+                    </span>
+                  </>
+                )}
               </div>
               {s.lastMessage && (
                 <div style={styles.message} title={s.lastMessage}>
@@ -111,5 +122,9 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
+  },
+  pendingBadge: {
+    color: 'var(--vscode-charts-orange)',
+    fontWeight: 600,
   },
 };

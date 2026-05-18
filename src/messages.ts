@@ -109,6 +109,10 @@ export const HistoryWebviewToHost = z.discriminatedUnion('type', [
   z.object({ type: z.literal('ready') }),
   z.object({ type: z.literal('load-session'), sessionId: z.string() }),
   z.object({ type: z.literal('log'), level: z.enum(['debug', 'info', 'warn']), msg: z.string() }),
+  // β.0 (10.1.8): destructive + resume actions from the History panel.
+  z.object({ type: z.literal('resume-session'), sessionId: z.string() }),
+  z.object({ type: z.literal('rollback-turn'), sessionId: z.string() }),
+  z.object({ type: z.literal('delete-session'), sessionId: z.string() }),
 ]);
 export type HistoryWebviewToHost = z.infer<typeof HistoryWebviewToHost>;
 
@@ -138,7 +142,16 @@ import type { SessionIndexEntry } from './history/historyTypes.js';
 export type HistoryHostToWebview =
   | { type: 'init'; sessions: SessionIndexEntry[]; root: string }
   | { type: 'session-loaded'; sessionId: string; events: HistoryEvent[] }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  // β.0 (10.1.8): host → webview acknowledgement so the UI can clear the
+  // disabled-while-inflight state and refresh after an action lands.
+  | {
+      type: 'session-action-result';
+      sessionId: string;
+      action: 'resume' | 'rollback' | 'delete';
+      ok: boolean;
+      error?: string;
+    };
 
 export type HostToWebview =
   | { type: 'init'; session: SessionReview; viewType: 'split' | 'unified' }
