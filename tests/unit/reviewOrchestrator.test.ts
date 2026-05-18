@@ -16,19 +16,21 @@ import {
 
 class FakePanel implements PanelGateway {
   opened: SessionReview[] = [];
-  fileUpdates: Array<{ filePath: AbsPath; file: FileReview }> = [];
-  hunkApplied: Array<{ filePath: AbsPath; hunkIndex: number; status: HunkStatus }> = [];
-  setConflicts: Array<{ filePath: AbsPath; attemptedHunkIndex: number; conflictingHunks: number[] }> = [];
+  fileUpdates: Array<{ sessionId: SessionId; filePath: AbsPath; file: FileReview }> = [];
+  hunkApplied: Array<{ sessionId: SessionId; filePath: AbsPath; hunkIndex: number; status: HunkStatus }> = [];
+  setConflicts: Array<{ sessionId: SessionId; filePath: AbsPath; attemptedHunkIndex: number; conflictingHunks: number[] }> = [];
   completed: Array<{ sessionId: SessionId; metrics: SessionMetrics }> = [];
   closed: SessionId[] = [];
 
   async openOrFocus(session: SessionReview) { this.opened.push(session); }
-  postFileUpdated(filePath: AbsPath, file: FileReview) { this.fileUpdates.push({ filePath, file }); }
-  postHunkApplied(filePath: AbsPath, hunkIndex: number, status: HunkStatus) {
-    this.hunkApplied.push({ filePath, hunkIndex, status });
+  postFileUpdated(sessionId: SessionId, filePath: AbsPath, file: FileReview) {
+    this.fileUpdates.push({ sessionId, filePath, file });
   }
-  postSetConflict(filePath: AbsPath, attemptedHunkIndex: number, conflictingHunks: number[]) {
-    this.setConflicts.push({ filePath, attemptedHunkIndex, conflictingHunks });
+  postHunkApplied(sessionId: SessionId, filePath: AbsPath, hunkIndex: number, status: HunkStatus) {
+    this.hunkApplied.push({ sessionId, filePath, hunkIndex, status });
+  }
+  postSetConflict(sessionId: SessionId, filePath: AbsPath, attemptedHunkIndex: number, conflictingHunks: number[]) {
+    this.setConflicts.push({ sessionId, filePath, attemptedHunkIndex, conflictingHunks });
   }
   undoDepths: number[] = [];
   postUndoStackDepth(_sid: SessionId, depth: number) { this.undoDepths.push(depth); }
@@ -178,7 +180,7 @@ describe('orchestrator — handleHunkAction', () => {
     await orchestrator.handleHunkAction('sid', abs, 0, 'reject');
 
     expect(written.get(abs)).toBe('one\ntwo\nthree\n');
-    expect(panel.hunkApplied[0]).toEqual({ filePath: abs, hunkIndex: 0, status: 'rejected' });
+    expect(panel.hunkApplied[0]).toEqual({ sessionId: 'sid', filePath: abs, hunkIndex: 0, status: 'rejected' });
   });
 
   it('accept does not call write but marks the hunk', async () => {

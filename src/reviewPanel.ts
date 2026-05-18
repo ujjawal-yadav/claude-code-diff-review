@@ -111,22 +111,16 @@ export class ReviewPanelManager implements PanelGateway {
     this.scheduleFlush(entry);
   }
 
-  postFileUpdated(filePath: AbsPath, file: FileReview): void {
-    const sid = this.findSessionForFile(filePath);
-    if (!sid) return;
-    this.post(sid, { type: 'file-updated', filePath, file });
+  postFileUpdated(sessionId: SessionId, filePath: AbsPath, file: FileReview): void {
+    this.post(sessionId, { type: 'file-updated', filePath, file });
   }
 
-  postHunkApplied(filePath: AbsPath, hunkIndex: number, status: HunkStatus): void {
-    const sid = this.findSessionForFile(filePath);
-    if (!sid) return;
-    this.post(sid, { type: 'hunk-applied', filePath, hunkIndex, action: status });
+  postHunkApplied(sessionId: SessionId, filePath: AbsPath, hunkIndex: number, status: HunkStatus): void {
+    this.post(sessionId, { type: 'hunk-applied', filePath, hunkIndex, action: status });
   }
 
-  postSetConflict(filePath: AbsPath, attemptedHunkIndex: number, conflictingHunks: number[]): void {
-    const sid = this.findSessionForFile(filePath);
-    if (!sid) return;
-    this.post(sid, { type: 'set-conflict-warning', filePath, attemptedHunkIndex, conflictingHunks });
+  postSetConflict(sessionId: SessionId, filePath: AbsPath, attemptedHunkIndex: number, conflictingHunks: number[]): void {
+    this.post(sessionId, { type: 'set-conflict-warning', filePath, attemptedHunkIndex, conflictingHunks });
   }
 
   postUndoStackDepth(sessionId: SessionId, depth: number): void {
@@ -288,9 +282,6 @@ export class ReviewPanelManager implements PanelGateway {
     this.orchestrator?.dismissSession(sessionId);
   }
 
-  private findSessionForFile(filePath: AbsPath): SessionId | undefined {
-    return findSessionForFile(this.panels, this.orchestrator, filePath);
-  }
 
   private renderHtml(webview: vscode.Webview): string {
     const nonce = crypto.randomBytes(16).toString('base64');
@@ -330,35 +321,3 @@ function titleFor(session: SessionReview): string {
   return `Review · ${session.sessionId.slice(0, 7)} · ${session.files.length} ${fileWord}`;
 }
 
-/**
- * β.0 (Resume Review): there can now be MULTIPLE panels open at once —
- * one for the currently-live Claude session, plus any resumed sessions
- * adopted via the History panel. The previous single-panel assumption
- * routed every host→webview message to the first panel in insertion
- * order, which silently misdelivered file-updated / hunk-applied /
- * set-conflict to the wrong webview after a Resume.
- *
- * Resolution order:
- *   1. Ask the orchestrator's denormalised `globalByPath` index — O(1)
- *      lookup of the file's owning session. If a panel for that session
- *      is open, route there.
- *   2. Fall back to the first-inserted panel (single-session contract
- *      from v0.1 — preserves behaviour for test harnesses without an
- *      orchestrator and for writes during dismissal).
- *
- * Exported as a free function so unit tests exercise the exact same
- * routing as the class method (no duplicated logic to drift).
- */
-export function findSessionForFile(
-  panels: ReadonlyMap<SessionId, unknown>,
-  orchestrator: { findFile(filePath: string): { session: SessionReview; file: FileReview } | null } | undefined,
-  filePath: AbsPath,
-): SessionId | undefined {
-  const owner = orchestrator?.findFile(filePath);
-  if (owner) {
-    const sid = owner.session.sessionId;
-    if (panels.has(sid)) return sid;
-  }
-  for (const sid of panels.keys()) return sid;
-  return undefined;
-}

@@ -25,19 +25,19 @@ import {
  */
 
 class CapturingPanel implements PanelGateway {
-  fileUpdates: Array<{ filePath: AbsPath; warnings: string[] }> = [];
-  hunkApplied: Array<{ filePath: AbsPath; hunkIndex: number; status: HunkStatus }> = [];
-  setConflicts: Array<{ filePath: AbsPath; attemptedHunkIndex: number; conflictingHunks: number[] }> = [];
+  fileUpdates: Array<{ sessionId: SessionId; filePath: AbsPath; warnings: string[] }> = [];
+  hunkApplied: Array<{ sessionId: SessionId; filePath: AbsPath; hunkIndex: number; status: HunkStatus }> = [];
+  setConflicts: Array<{ sessionId: SessionId; filePath: AbsPath; attemptedHunkIndex: number; conflictingHunks: number[] }> = [];
   completed: Array<{ sessionId: SessionId }> = [];
   async openOrFocus(_session: SessionReview) {}
-  postFileUpdated(filePath: AbsPath, file: FileReview) {
-    this.fileUpdates.push({ filePath, warnings: [...file.warnings] });
+  postFileUpdated(sessionId: SessionId, filePath: AbsPath, file: FileReview) {
+    this.fileUpdates.push({ sessionId, filePath, warnings: [...file.warnings] });
   }
-  postHunkApplied(filePath: AbsPath, hunkIndex: number, status: HunkStatus) {
-    this.hunkApplied.push({ filePath, hunkIndex, status });
+  postHunkApplied(sessionId: SessionId, filePath: AbsPath, hunkIndex: number, status: HunkStatus) {
+    this.hunkApplied.push({ sessionId, filePath, hunkIndex, status });
   }
-  postSetConflict(filePath: AbsPath, attemptedHunkIndex: number, conflictingHunks: number[]) {
-    this.setConflicts.push({ filePath, attemptedHunkIndex, conflictingHunks });
+  postSetConflict(sessionId: SessionId, filePath: AbsPath, attemptedHunkIndex: number, conflictingHunks: number[]) {
+    this.setConflicts.push({ sessionId, filePath, attemptedHunkIndex, conflictingHunks });
   }
   undoDepths: number[] = [];
   postUndoStackDepth(_sid: SessionId, depth: number) { this.undoDepths.push(depth); }

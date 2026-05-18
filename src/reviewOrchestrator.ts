@@ -48,15 +48,24 @@ const RE_DIFF_DEBOUNCE_MS = 200;
 
 export interface PanelGateway {
   openOrFocus(session: SessionReview): Promise<void>;
-  postFileUpdated(filePath: AbsPath, file: FileReview): void;
-  postHunkApplied(filePath: AbsPath, hunkIndex: number, status: HunkStatus): void;
+  /**
+   * β.0 multi-panel correctness: the three file-targeted post helpers now
+   * carry `sessionId` explicitly. The orchestrator knows it at every call
+   * site (we're always inside a `handleHunkAction(sid, ...)` /
+   * `handleBulk(sid, ...)` / `reDiff(sid, ...)` / similar), so this is
+   * pure plumbing. The earlier `findSessionForFile` lookup-via-globalByPath
+   * routed wrong when two sessions touched the same file (last-write-wins
+   * in `indexFiles`). Explicit sid eliminates the class.
+   */
+  postFileUpdated(sessionId: SessionId, filePath: AbsPath, file: FileReview): void;
+  postHunkApplied(sessionId: SessionId, filePath: AbsPath, hunkIndex: number, status: HunkStatus): void;
   postSessionCompleted(sessionId: SessionId, metrics: SessionMetrics): void;
   /**
    * Phase α Track 6: surface a set-conflict from the set-based renderer.
    * The orchestrator has already reverted the offending set change; the
    * webview is responsible for the UX (banner + "re-accept coupled hunks").
    */
-  postSetConflict(filePath: AbsPath, attemptedHunkIndex: number, conflictingHunks: number[]): void;
+  postSetConflict(sessionId: SessionId, filePath: AbsPath, attemptedHunkIndex: number, conflictingHunks: number[]): void;
   /** Option A: tell the webview the current undo-stack depth (0 ⇒ disable ↶). */
   postUndoStackDepth(sessionId: SessionId, depth: number): void;
   close(sessionId: SessionId): void;
@@ -251,10 +260,10 @@ export class ReviewOrchestrator {
 
       if (!outcome.ok) {
         if (outcome.reason === 'set-conflict') {
-          this.opts.panel.postSetConflict(absFile, hunkIndex, outcome.conflictingHunks);
+          this.opts.panel.postSetConflict(sid, absFile, hunkIndex, outcome.conflictingHunks);
         }
         // hunk stays pending; warnings already attached to file inside applyHunkSetChange
-        this.opts.panel.postFileUpdated(absFile, file);
+        this.opts.panel.postFileUpdated(sid, absFile, file);
         return;
       }
 
@@ -262,7 +271,7 @@ export class ReviewOrchestrator {
       hunk.decidedAt = Date.now();
       file.status = recomputeFileStatus(file.hunks);
       review.metrics = recomputeMetrics(review.files);
-      this.opts.panel.postHunkApplied(absFile, hunkIndex, hunk.status);
+      this.opts.panel.postHunkApplied(sid, absFile, hunkIndex, hunk.status);
       this.pushUndoSnapshot(sid, snapshot);
       this.notifyChange();
       this.maybeComplete(review);
@@ -319,9 +328,9 @@ export class ReviewOrchestrator {
       if (!outcome.ok) {
         // Conflict during bulk → keep pending; surface single banner per file.
         if (outcome.reason === 'set-conflict') {
-          this.opts.panel.postSetConflict(file.filePath, pendingIndices[0], outcome.conflictingHunks);
+          this.opts.panel.postSetConflict(sid, file.filePath, pendingIndices[0], outcome.conflictingHunks);
         }
-        this.opts.panel.postFileUpdated(file.filePath, file);
+        this.opts.panel.postFileUpdated(sid, file.filePath, file);
         return;
       }
 
@@ -332,7 +341,7 @@ export class ReviewOrchestrator {
         h.decidedAt = now;
       }
       file.status = recomputeFileStatus(file.hunks);
-      this.opts.panel.postFileUpdated(file.filePath, file);
+      this.opts.panel.postFileUpdated(sid, file.filePath, file);
       bulkProducedChanges = true;
 
       // Phase α Track 1: log each hunk decision in this bulk batch.
@@ -396,9 +405,9 @@ export class ReviewOrchestrator {
         // Best-effort: surface conflict if any (rare for undo since the
         // prior decision was rendered cleanly), then leave status as-is.
         if (outcome.reason === 'set-conflict') {
-          this.opts.panel.postSetConflict(absFile, hunkIndex, outcome.conflictingHunks);
+          this.opts.panel.postSetConflict(sid, absFile, hunkIndex, outcome.conflictingHunks);
         }
-        this.opts.panel.postFileUpdated(absFile, file);
+        this.opts.panel.postFileUpdated(sid, absFile, file);
         return;
       }
 
@@ -406,7 +415,7 @@ export class ReviewOrchestrator {
       delete hunk.decidedAt;
       file.status = recomputeFileStatus(file.hunks);
       review.metrics = recomputeMetrics(review.files);
-      this.opts.panel.postHunkApplied(absFile, hunkIndex, hunk.status);
+      this.opts.panel.postHunkApplied(sid, absFile, hunkIndex, hunk.status);
       this.pushUndoSnapshot(sid, snapshot);
       this.notifyChange();
 
@@ -473,7 +482,7 @@ export class ReviewOrchestrator {
         // Write failed → leave hunks untouched (caller can retry; matches
         // v0.1.0 invariant that decisions only flip on successful disk write).
         // `applyHunkSetChange` already added the appropriate warning.
-        this.opts.panel.postFileUpdated(absFile, file);
+        this.opts.panel.postFileUpdated(sid, absFile, file);
         return;
       }
 
@@ -486,7 +495,7 @@ export class ReviewOrchestrator {
       }
       file.status = recomputeFileStatus(file.hunks);
       review.metrics = recomputeMetrics(review.files);
-      this.opts.panel.postFileUpdated(absFile, file);
+      this.opts.panel.postFileUpdated(sid, absFile, file);
       this.pushUndoSnapshot(sid, snapshot);
       this.opts.logger.info('orchestrator', 'file.snapshot-reverted', { file: absFile });
       this.notifyChange();
@@ -1160,7 +1169,7 @@ export class ReviewOrchestrator {
             // and don't corrupt the in-memory state.
             stack.push(snapshot);
             this.markWriteFailed(file, err);
-            this.opts.panel.postFileUpdated(absFile, file);
+            this.opts.panel.postFileUpdated(sid, absFile, file);
             this.opts.panel.postUndoStackDepth(sid, stack.length);
             return;
           }
@@ -1179,7 +1188,7 @@ export class ReviewOrchestrator {
         file.status = recomputeFileStatus(file.hunks);
         // Restore warnings exactly so transient banners revert too.
         file.warnings = [...fileSnap.warnings];
-        this.opts.panel.postFileUpdated(absFile, file);
+        this.opts.panel.postFileUpdated(sid, absFile, file);
 
         // Phase β.0 (FR-B0.7): capture content for audit emission.
         undoPostContents.set(absFile, file.after);
@@ -1308,7 +1317,7 @@ export class ReviewOrchestrator {
         acceptedSet: newAccepted,
       });
 
-      this.opts.panel.postFileUpdated(absPath, file);
+      this.opts.panel.postFileUpdated(sid, absPath, file);
       this.notifyChange();
     });
   }
