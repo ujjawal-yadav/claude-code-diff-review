@@ -10,6 +10,7 @@ import { SnapshotStore } from './snapshotStore.js';
 import { ReviewOrchestrator } from './reviewOrchestrator.js';
 import { ReviewPanelManager } from './reviewPanel.js';
 import { StatusBarController } from './statusBarController.js';
+import { PendingStatusBar } from './pendingStatusBar.js';
 import { ClaudeReviewScmProvider } from './scmProvider.js';
 import { AnthropicClient } from './anthropicClient.js';
 import { ChatService } from './chatService.js';
@@ -158,9 +159,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   }
 
+  // β.0 (10.1.6): forward-declared so the orchestrator's `onChange` can
+  // schedule a debounced refresh. Assigned a few lines below, after the
+  // live StatusBarController is constructed.
+  let pendingStatusBar: PendingStatusBar | null = null;
   const orchestrator = new ReviewOrchestrator({
     store, panel, logger,
-    onChange: () => codeLens?.refresh(),
+    onChange: () => {
+      codeLens?.refresh();
+      pendingStatusBar?.scheduleRefresh();
+    },
     ...(history ? { history } : {}),
     agentId: 'claude-code',
   });
@@ -178,6 +186,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   panel.setChatService(chatService);
 
   const statusBar = new StatusBarController(context, 'claudeReview.openPanel');
+  // β.0 (10.1.6): pending-reviews indicator for recoverable sessions in the
+  // event log (distinct from `statusBar` which tracks live-session counts).
+  if (history) {
+    pendingStatusBar = new PendingStatusBar(context, history, logger);
+  }
   let scm: ClaudeReviewScmProvider | undefined;
   const lazyScm = () => {
     if (!scm) scm = new ClaudeReviewScmProvider(context);
@@ -436,14 +449,57 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       await historyPanel.openOrFocus();
     }),
-    vscode.commands.registerCommand('claudeReview.openPanel', () => {
+    vscode.commands.registerCommand('claudeReview.openPanel', async () => {
       const sids = activeSessionIds(orchestrator);
-      if (sids.length === 0) {
-        vscode.window.showInformationMessage('Claude Code Review: no active session.');
+      if (sids.length > 0) {
+        const review = orchestrator.getSession(sids[0]);
+        if (review) panel.openOrFocus(review);
         return;
       }
-      const review = orchestrator.getSession(sids[0]);
-      if (review) panel.openOrFocus(review);
+      // β.0 (10.1.7): zero in-memory sessions — check the event log for
+      // recoverable sessions with pending review. If any exist, prompt the
+      // user. Otherwise fall back to the legacy "no active session" toast.
+      if (history) {
+        try {
+          const summary = await history.getPendingReviewsSummary();
+          if (summary.totalPendingHunks > 0 && summary.sessions.length > 0) {
+            const top = summary.sessions[0];
+            const RESUME = 'Resume';
+            const OPEN_HISTORY = 'Open History';
+            const DISMISS = 'Dismiss';
+            const ago = humanizeAgoForPrompt(top.lastEventAt);
+            const hunkLabel = summary.totalPendingHunks === 1 ? 'hunk' : 'hunks';
+            const choice = await vscode.window.showInformationMessage(
+              `Claude Code Review: ${summary.totalPendingHunks} ${hunkLabel} pending in session ${top.sessionId.slice(0, 8)} (${ago}). Resume?`,
+              { modal: true },
+              RESUME, OPEN_HISTORY, DISMISS,
+            );
+            if (choice === RESUME) {
+              const recon = await history.reconstructSessionReview(top.sessionId);
+              if (recon) {
+                orchestrator.adoptReconstructed(recon);
+                const review = orchestrator.getSession(top.sessionId);
+                if (review) await panel.openOrFocus(review);
+                pendingStatusBar?.scheduleRefresh();
+              } else {
+                vscode.window.showWarningMessage(
+                  `Claude Code Review: could not reconstruct session ${top.sessionId.slice(0, 8)}.`,
+                );
+              }
+              return;
+            }
+            if (choice === OPEN_HISTORY) {
+              await vscode.commands.executeCommand('claudeReview.openHistory');
+              return;
+            }
+            // DISMISS or escape — no-op
+            return;
+          }
+        } catch (err) {
+          logger?.warn('command', 'openPanel.resumeProbe.failed', { err: String(err) });
+        }
+      }
+      vscode.window.showInformationMessage('Claude Code Review: no active session.');
     }),
     vscode.commands.registerCommand(ACCEPT_HUNK_AT, async (sessionId: string, filePath: string, hunkIndex: number) => {
       await orchestrator.handleHunkAction(sessionId, filePath, hunkIndex, 'accept');
@@ -464,6 +520,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 function activeSessionIds(orchestrator: ReviewOrchestrator): string[] {
   return orchestrator.listSessionIds();
+}
+
+/**
+ * β.0 (10.1.7): human-readable "time ago" used in the `openPanel` resume
+ * prompt. Kept module-local so the prompt copy lives next to the call site.
+ */
+function humanizeAgoForPrompt(ts: number): string {
+  const deltaMs = Date.now() - ts;
+  if (deltaMs < 60_000) return 'just now';
+  const minutes = Math.floor(deltaMs / 60_000);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
 }
 
 /**

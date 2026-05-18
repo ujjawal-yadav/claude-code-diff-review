@@ -28,6 +28,7 @@ import * as path from 'node:path';
 import { BlobStore, sha256Hex } from './historyBlobs.js';
 import type {
   FileDriftStatus,
+  PendingReviewsSummary,
   ReconstructedFileReview,
   ReconstructedSessionReview,
 } from './historyTypes.js';
@@ -144,6 +145,15 @@ export class HistoryService {
   private readonly writers = new Map<string, HistoryWriter>();
   /** Index entries kept in memory between turn-started and turn-stopped. */
   private readonly liveSessions = new Map<string, SessionIndexEntry>();
+  /**
+   * β.0 (10.1.5b): 1-second TTL cache for `getPendingReviewsSummary`. The
+   * status bar's debounced refresh and the `openPanel` command upgrade both
+   * call this method; the cache absorbs the recompute storm during a burst.
+   * Invalidated explicitly via `invalidatePendingSummaryCache` whenever the
+   * underlying counts change (hunk decisions, undo, file revert, delete).
+   */
+  private pendingSummaryCache: { value: PendingReviewsSummary; expiresAt: number } | null = null;
+  private static readonly PENDING_SUMMARY_TTL_MS = 1_000;
 
   constructor(private readonly opts: HistoryServiceOptions) {
     this.root = resolveHistoryRoot(opts.scope, opts.workspaceRoot);
@@ -835,6 +845,129 @@ export class HistoryService {
       // Persist only if it changed something callers will read soon.
       await this.index.upsertSession(entry);
     }
+    // β.0 (10.1.5b): the per-session change always invalidates the aggregate.
+    this.pendingSummaryCache = null;
+  }
+
+  /**
+   * β.0 (10.1.5b): aggregate "what's pending review across all recent sessions"
+   * view, composed from `listSessions()` + per-session `getPendingHunkCount`.
+   * Drives the status bar pending-count indicator and the `Open Review Panel`
+   * resume prompt.
+   *
+   * Implementation notes
+   * --------------------
+   * 1. Filter by `withinMs` (default 7 days) to bound the work — older sessions
+   *    are out of resume scope per the existing crash-recovery probe semantics.
+   * 2. Exclude `status === 'aborted'` sessions — those were explicitly torn down
+   *    (window-closed reason, extension deactivated, etc.). Open / closed both
+   *    qualify: an unfinished closed session is the central β.0 use case.
+   * 3. Use cached `pendingHunkCount` from the index when present (the lazy
+   *    cache is maintained by `getPendingHunkCount`); fall back to a fresh
+   *    replay otherwise.
+   * 4. `totalCount` is the size of the most recent turn-stopped's hunks list
+   *    — derived via a single stream scan alongside the pending count.
+   * 5. 1-second TTL cache on the whole result absorbs the recompute storm
+   *    when the status bar + openPanel command both fire within the same tick.
+   */
+  async getPendingReviewsSummary(opts?: {
+    withinMs?: number;
+    topN?: number;
+  }): Promise<PendingReviewsSummary> {
+    const now = Date.now();
+    if (this.pendingSummaryCache && this.pendingSummaryCache.expiresAt > now) {
+      return this.pendingSummaryCache.value;
+    }
+
+    const withinMs = opts?.withinMs ?? 7 * 24 * 60 * 60 * 1000;
+    const topN     = opts?.topN     ?? 5;
+    const cutoff   = now - withinMs;
+
+    const sessions = await this.listSessions();
+    const recoverable = sessions.filter(
+      (s) => s.lastEventAt >= cutoff && s.status !== 'aborted',
+    );
+
+    const enriched = await Promise.all(
+      recoverable.map(async (s) => {
+        const { pending, total } = await this.computePendingAndTotal(s);
+        return {
+          sessionId: s.sessionId,
+          agentId: s.agentId,
+          pendingCount: pending,
+          totalCount: total,
+          lastEventAt: s.lastEventAt,
+          status: s.status,
+        };
+      }),
+    );
+
+    const withPending = enriched.filter((e) => e.pendingCount > 0);
+    const summary: PendingReviewsSummary = {
+      totalSessions: withPending.length,
+      totalPendingHunks: withPending.reduce((sum, e) => sum + e.pendingCount, 0),
+      sessions: withPending
+        .sort((a, b) => b.lastEventAt - a.lastEventAt)
+        .slice(0, topN),
+    };
+
+    this.pendingSummaryCache = {
+      value: summary,
+      expiresAt: now + HistoryService.PENDING_SUMMARY_TTL_MS,
+    };
+    return summary;
+  }
+
+  /**
+   * Single-pass computation of (pending, total) for a session. `pending` uses
+   * the same replay semantics as `getPendingHunkCount`; `total` is the count of
+   * hunks in the most recent `turn-stopped` (or the running total across turns
+   * if multiple turn-stoppeds exist, which matches the v0.2 surface).
+   */
+  private async computePendingAndTotal(
+    entry: SessionIndexEntry,
+  ): Promise<{ pending: number; total: number }> {
+    // Fast path: cached pending count + a single scan for total only.
+    if (entry.pendingHunkCount != null) {
+      let total = 0;
+      for await (const ev of this.reader.readSession(entry.sessionId)) {
+        if (ev.kind === 'turn-stopped') {
+          for (const f of ev.files) total += f.hunks.length;
+        }
+      }
+      return { pending: entry.pendingHunkCount, total };
+    }
+    // Slow path: replay once, compute both.
+    type HunkKey = string;
+    const pendingSet = new Set<HunkKey>();
+    let total = 0;
+    for await (const ev of this.reader.readSession(entry.sessionId)) {
+      switch (ev.kind) {
+        case 'turn-stopped':
+          for (const f of ev.files) {
+            total += f.hunks.length;
+            for (const h of f.hunks) pendingSet.add(`${f.path}::${h.idx}`);
+          }
+          break;
+        case 'hunk-decided':
+          pendingSet.delete(`${ev.path}::${ev.hunkIdx}`);
+          break;
+        case 'file-snapshot-reverted':
+          for (const k of Array.from(pendingSet)) {
+            if (k.startsWith(`${ev.path}::`)) pendingSet.delete(k);
+          }
+          break;
+        case 'undo':
+          if (ev.scope === 'hunk' && ev.target.path && ev.target.hunkIdx !== undefined) {
+            pendingSet.add(`${ev.target.path}::${ev.target.hunkIdx}`);
+          }
+          break;
+        case 'turn-started':
+        case 'turn-aborted':
+          break;
+      }
+    }
+    return { pending: pendingSet.size, total };
   }
 }
 
