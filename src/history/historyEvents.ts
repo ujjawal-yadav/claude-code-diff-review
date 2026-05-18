@@ -53,6 +53,14 @@ export interface TurnStoppedEvent extends BaseEvent {
     isNew: boolean;
     isDeleted: boolean;
     isBinary: boolean;
+    /**
+     * M9.6 (Wave 4): which sub-agent (Claude Code Task tool) produced
+     * THIS file's edit. `undefined` for main-agent edits or for events
+     * written before Wave 4 landed (forward-compat). The base event's
+     * `subagentId` is per-event; this per-file field is needed because
+     * a single turn can span multiple sub-agents.
+     */
+    subagentId?: string;
     hunks: Array<{
       idx: number;
       oldStart: number; oldLines: number;
@@ -121,6 +129,8 @@ const FileAfterRef = z.object({
   isNew: z.boolean(),
   isDeleted: z.boolean(),
   isBinary: z.boolean(),
+  // M9.6: optional for forward-compat with pre-Wave-4 events on disk.
+  subagentId: z.string().optional(),
   hunks: z.array(z.object({
     idx: z.number().int().nonnegative(),
     oldStart: z.number().int().nonnegative(),

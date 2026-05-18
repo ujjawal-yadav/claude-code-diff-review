@@ -62,11 +62,19 @@ export class SnapshotStore {
     cwd: string,
     rawPath: string,
     agentId: AgentId = 'claude-code',
+    subagentId: string | null = null,
   ): Promise<AbsPath | null> {
     const resolved = resolveSafe(cwd, rawPath);
     if (resolved == null) return null;
 
     const session = this.getOrCreateSession(sessionId as SessionId, cwd, agentId);
+    // M9.6: first-write-wins on sub-agent attribution per path. If a later
+    // PreToolUse for the same file arrives under a different sub-agent
+    // (rare; would indicate Claude switched contexts mid-turn), we keep
+    // the original attribution — matches how `originals` already behaves.
+    if (!session.subagentIdByPath.has(resolved)) {
+      session.subagentIdByPath.set(resolved, subagentId);
+    }
     const lockKey = `${session.sessionId}::${resolved}`;
 
     const prior = this.locks.get(lockKey) ?? Promise.resolve();
@@ -130,11 +138,16 @@ export class SnapshotStore {
     cwd: string,
     rawPath: string,
     agentId: AgentId = 'claude-code',
+    subagentId: string | null = null,
   ): AbsPath | null {
     const resolved = resolveSafe(cwd, rawPath);
     if (resolved == null) return null;
     const session = this.getOrCreateSession(sessionId as SessionId, cwd, agentId);
     session.touched.add(resolved);
+    // M9.6: same first-write-wins as captureOriginal.
+    if (!session.subagentIdByPath.has(resolved)) {
+      session.subagentIdByPath.set(resolved, subagentId);
+    }
     session.lastEventAt = Date.now();
     return resolved;
   }
@@ -224,6 +237,12 @@ export class SnapshotStore {
     touched?: ReadonlySet<AbsPath>;
     startedAt?: number;
     agentId?: AgentId;
+    /**
+     * M9.6: pre-populate sub-agent attribution per file from reconstruction.
+     * Reconstructed sessions carry this from the event log's per-file
+     * `subagentId`; live sessions populate via captureOriginal / recordTouched.
+     */
+    subagentIdByPath?: ReadonlyMap<AbsPath, string | null>;
   }): void {
     const sid = input.sessionId as SessionId;
     const now = Date.now();
@@ -239,6 +258,7 @@ export class SnapshotStore {
       currentTurnId: input.currentTurnId,
       turnStartedAt: input.turnStartedAt,
       lastTurnId: input.lastTurnId,
+      subagentIdByPath: new Map(input.subagentIdByPath ?? []),
     };
     this.sessions.set(sid, session);
   }
@@ -258,6 +278,7 @@ export class SnapshotStore {
       currentTurnId: null,
       turnStartedAt: null,
       lastTurnId: null,
+      subagentIdByPath: new Map(),
     };
     this.sessions.set(sessionId, fresh);
     return fresh;

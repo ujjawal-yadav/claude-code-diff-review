@@ -78,6 +78,8 @@ export interface RecordTurnStoppedInput {
     isNew: boolean;
     isDeleted: boolean;
     isBinary: boolean;
+    /** M9.6: per-file sub-agent attribution. */
+    subagentId?: string;
     hunks: Array<{
       idx: number;
       oldStart: number; oldLines: number;
@@ -214,6 +216,7 @@ export class HistoryService {
           isNew: f.isNew,
           isDeleted: f.isDeleted,
           isBinary: f.isBinary,
+          ...(f.subagentId ? { subagentId: f.subagentId } : {}),
           hunks: f.hunks,
         });
       }
@@ -414,6 +417,8 @@ export class HistoryService {
       isNew: boolean;
       isDeleted: boolean;
       isBinary: boolean;
+      /** M9.6: per-file sub-agent attribution from turn-stopped events. */
+      subagentId?: string;
       hunks: ReconstructedFileReview['hunks'];
       acceptedSet: Set<number>;
     }
@@ -471,6 +476,8 @@ export class HistoryService {
             state.isNew = f.isNew;
             state.isDeleted = f.isDeleted;
             state.isBinary = f.isBinary;
+            // M9.6: preserve per-file sub-agent attribution across replay.
+            if (f.subagentId) state.subagentId = f.subagentId;
             state.hunks = f.hunks.map((h) => ({
               index: h.idx,
               oldStart: h.oldStart,
@@ -588,6 +595,7 @@ export class HistoryService {
         isNew: state.isNew,
         isDeleted: state.isDeleted,
         isBinary: state.isBinary,
+        ...(state.subagentId ? { subagentId: state.subagentId } : {}),
         hunks: state.hunks.map((h) => ({ ...h })),
       });
       hunkSets.push({

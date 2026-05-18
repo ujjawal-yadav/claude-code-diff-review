@@ -7,6 +7,12 @@ import {
   StopPayload,
 } from '../messages.js';
 import {
+  findLatestTaskBefore,
+  readTaskEntries,
+  type TaskEntry,
+} from '../transcript/transcriptReader.js';
+import { parseTranscriptTimestamp } from '../transcript/transcriptSchema.js';
+import {
   AgentAdapter,
   AgentId,
   HookConfigOpts,
@@ -49,6 +55,18 @@ export interface ClaudeCodeHookConfig {
 
 export class ClaudeCodeAdapter implements AgentAdapter {
   readonly agentId: AgentId = 'claude-code';
+
+  /**
+   * M9.6: per-session cache of `Task` tool_use entries from the transcript,
+   * sorted by timestamp. First call per session triggers a transcript scan;
+   * subsequent calls binary-search the cache. Cleared by
+   * `clearSubagentCache(sessionId)` when the session ends.
+   *
+   * `null` value means "we tried to load and the transcript didn't exist or
+   * contained no Task entries" — caching the negative result avoids
+   * repeated I/O on every PreToolUse in a session that has no sub-agents.
+   */
+  private readonly taskCache = new Map<string, ReadonlyArray<TaskEntry> | null>();
 
   // ------------------------------------------------------------------------
   // generateHookConfig — extracted from src/hookConfigurator.ts buildEntry
@@ -103,13 +121,15 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const data = parsed.data;
     if (!EDIT_TOOLS.has(data.tool_name)) return null;
 
+    // M9.6: subagentId is hydrated separately by the caller via the async
+    // `extractSubagentId(raw)` method. Parse stays sync; caller awaits.
     const result: NormalisedPreToolUse = {
       agentId: this.agentId,
       sessionId: data.session_id,
       toolName:  data.tool_name,
       filePath:  data.tool_input.file_path ?? null,
       cwd:       data.cwd,
-      subagentId: this.extractSubagentId(raw),
+      subagentId: null,
     };
     if (typeof data.tool_input.content === 'string') {
       result.fileContent = data.tool_input.content;
@@ -130,7 +150,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       filePath:  data.tool_input.file_path ?? null,
       success:   data.tool_result?.success ?? true,
       cwd:       data.cwd,
-      subagentId: this.extractSubagentId(raw),
+      subagentId: null,
     };
   }
 
@@ -190,10 +210,73 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     return resolved;
   }
 
-  extractSubagentId(_rawPayload: unknown): string | null {
-    // TODO M9.6 — read Task-tool nesting from `transcript_path` / parent ids.
-    return null;
+  /**
+   * Find the most recent `Task` tool_use in the transcript whose timestamp
+   * is ≤ this payload's timestamp; return its description (the sub-agent's
+   * human-readable name). Returns `null` if:
+   *   - the payload is unparseable
+   *   - the transcript doesn't exist (resolveTranscriptPath → null)
+   *   - the transcript has no `Task` entries
+   *   - no Task precedes this payload's timestamp (main-agent edit)
+   *
+   * Cache: lazy per-session. First call streams the transcript and stores a
+   * sorted `TaskEntry[]`. Subsequent calls binary-search that cache. Call
+   * `clearSubagentCache(sessionId)` on session end to bound memory.
+   */
+  async extractSubagentId(rawPayload: unknown): Promise<string | null> {
+    const meta = parsePayloadForSubagent(rawPayload);
+    if (!meta) return null;
+    let tasks = this.taskCache.get(meta.sessionId);
+    if (tasks === undefined) {
+      // First call for this session: load the transcript once.
+      const transcriptPath = this.resolveTranscriptPath(meta.sessionId, meta.cwd);
+      if (!transcriptPath) {
+        this.taskCache.set(meta.sessionId, null);
+        return null;
+      }
+      const loaded = await readTaskEntries(transcriptPath);
+      tasks = loaded.length > 0 ? loaded : null;
+      this.taskCache.set(meta.sessionId, tasks);
+    }
+    if (!tasks) return null;
+    const entry = findLatestTaskBefore(tasks, meta.timestamp);
+    return entry?.description ?? null;
   }
+
+  clearSubagentCache(sessionId: string): void {
+    this.taskCache.delete(sessionId);
+  }
+}
+
+/**
+ * Extract the (sessionId, cwd, timestamp) tuple needed by extractSubagentId.
+ * Accepts either a PreToolUse or PostToolUse raw payload — both share the
+ * relevant fields. Returns null if any required field is missing.
+ *
+ * Timestamp source: Claude Code's hook payload carries no per-event time,
+ * so we use `Date.now()` as a monotonic proxy. The transcript's tool_use
+ * timestamps come from the JSONL which Claude Code wrote moments before
+ * the hook fired — `Date.now()` is later than all entries in the
+ * transcript for this turn, so `findLatestTaskBefore` finds the right one.
+ */
+function parsePayloadForSubagent(
+  raw: unknown,
+): { sessionId: string; cwd: string; timestamp: number } | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const sessionId = r.session_id;
+  const cwd = r.cwd;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
+  if (typeof cwd !== 'string' || cwd.length === 0) return null;
+  // Some payloads include an explicit timestamp; prefer it. Otherwise the
+  // hook moment is now-ish (Claude wrote the tool_use to the transcript
+  // microseconds ago).
+  let timestamp = Date.now();
+  if (typeof r.timestamp === 'string') {
+    const ms = parseTranscriptTimestamp(r.timestamp);
+    if (Number.isFinite(ms)) timestamp = ms;
+  }
+  return { sessionId, cwd, timestamp };
 }
 
 /** Exported for unit tests. */

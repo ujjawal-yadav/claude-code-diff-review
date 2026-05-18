@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import type { HistoryEvent } from '../../../src/history/historyEvents.js';
 import type { SessionIndexEntry } from '../../../src/history/historyTypes.js';
+import { truncate } from '../../utils/truncate.js';
 
 interface SessionDetailProps {
   session: SessionIndexEntry;
@@ -19,7 +20,12 @@ interface TurnSummary {
   startedAt: number | null;
   stoppedAt: number | null;
   lastAssistantMessage: string | null;
-  files: Map<string, { decisions: { accepted: number; rejected: number }; reverted: boolean }>;
+  files: Map<string, {
+    decisions: { accepted: number; rejected: number };
+    reverted: boolean;
+    /** M9.6: per-file sub-agent attribution from turn-stopped event. */
+    subagentId: string | null;
+  }>;
   aborted: boolean;
 }
 
@@ -140,6 +146,15 @@ function TurnCard({ index, turn }: { index: number; turn: TurnSummary }): JSX.El
           {Array.from(turn.files.entries()).map(([path, f]) => (
             <li key={path}>
               <code>{path}</code>
+              {f.subagentId && (
+                <span
+                  style={styles.subagentInline}
+                  title={`Produced by Task: ${f.subagentId}`}
+                  aria-label={`Produced by Task: ${f.subagentId}`}
+                >
+                  · via {truncate(f.subagentId, 24)}
+                </span>
+              )}
               {f.decisions.accepted > 0 && <span style={styles.acceptBadge}>{f.decisions.accepted}✓</span>}
               {f.decisions.rejected > 0 && <span style={styles.rejectBadge}>{f.decisions.rejected}✗</span>}
               {f.reverted && <span style={styles.revertBadge} title="full-file snapshot revert">↶ revert</span>}
@@ -175,7 +190,7 @@ function aggregateTurns(events: HistoryEvent[]): TurnSummary[] {
         turn.startedAt = ev.ts;
         for (const f of ev.files) {
           if (!turn.files.has(f.path)) {
-            turn.files.set(f.path, { decisions: { accepted: 0, rejected: 0 }, reverted: false });
+            turn.files.set(f.path, { decisions: { accepted: 0, rejected: 0 }, reverted: false, subagentId: null });
           }
         }
         break;
@@ -183,14 +198,22 @@ function aggregateTurns(events: HistoryEvent[]): TurnSummary[] {
         turn.stoppedAt = ev.ts;
         turn.lastAssistantMessage = ev.lastAssistantMessage;
         for (const f of ev.files) {
-          if (!turn.files.has(f.path)) {
-            turn.files.set(f.path, { decisions: { accepted: 0, rejected: 0 }, reverted: false });
+          const existing = turn.files.get(f.path);
+          if (!existing) {
+            // M9.6: pick up per-file sub-agent attribution from the stopped event.
+            turn.files.set(f.path, {
+              decisions: { accepted: 0, rejected: 0 },
+              reverted: false,
+              subagentId: f.subagentId ?? null,
+            });
+          } else if (f.subagentId && !existing.subagentId) {
+            existing.subagentId = f.subagentId;
           }
         }
         break;
       case 'hunk-decided': {
         if (!turn.files.has(ev.path)) {
-          turn.files.set(ev.path, { decisions: { accepted: 0, rejected: 0 }, reverted: false });
+          turn.files.set(ev.path, { decisions: { accepted: 0, rejected: 0 }, reverted: false, subagentId: null });
         }
         const f = turn.files.get(ev.path)!;
         if (ev.decision === 'accepted') f.decisions.accepted++;
@@ -199,7 +222,7 @@ function aggregateTurns(events: HistoryEvent[]): TurnSummary[] {
       }
       case 'file-snapshot-reverted': {
         if (!turn.files.has(ev.path)) {
-          turn.files.set(ev.path, { decisions: { accepted: 0, rejected: 0 }, reverted: true });
+          turn.files.set(ev.path, { decisions: { accepted: 0, rejected: 0 }, reverted: true, subagentId: null });
         } else {
           turn.files.get(ev.path)!.reverted = true;
         }
@@ -211,10 +234,6 @@ function aggregateTurns(events: HistoryEvent[]): TurnSummary[] {
     }
   }
   return Array.from(map.values()).sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0));
-}
-
-function truncate(s: string, max: number): string {
-  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -256,6 +275,12 @@ const styles: Record<string, React.CSSProperties> = {
   acceptBadge: { color: 'var(--vscode-charts-green)', marginLeft: '0.4rem' },
   rejectBadge: { color: 'var(--vscode-charts-red)', marginLeft: '0.4rem' },
   revertBadge: { color: 'var(--vscode-charts-orange)', marginLeft: '0.4rem', fontSize: '0.85em' },
+  subagentInline: {
+    color: 'var(--vscode-descriptionForeground)',
+    marginLeft: '0.4rem',
+    fontSize: '0.85em',
+    fontStyle: 'italic',
+  },
   pendingBadge: {
     marginLeft: '0.5rem',
     padding: '0 0.4rem',

@@ -147,7 +147,23 @@ export interface AgentAdapter {
    * agent attributes events to nested agents (Claude Code's Task
    * tool, OpenCode's sub-prompts, etc.).
    *
-   * Returns `null` until M9.6 lands.
+   * Async because the canonical source (Claude Code's JSONL transcript)
+   * requires file I/O — implementations typically cache the parsed
+   * `Task` entries per session and binary-search by timestamp for
+   * subsequent calls. The first call per session pays the scan cost
+   * (~10–30 ms on a 5 MB transcript); subsequent calls are sub-ms.
+   *
+   * `parsePreToolUse` / `parsePostToolUse` MUST NOT call this internally
+   * (they're sync). Callers in the host (extension.ts.onPreToolUse)
+   * await it after parsing and thread the result through to the
+   * snapshot store.
    */
-  extractSubagentId(rawPayload: unknown): string | null;
+  extractSubagentId(rawPayload: unknown): Promise<string | null>;
+
+  /**
+   * Optional cache-eviction hook. Implementations that cache transcript
+   * data per session SHOULD clear that cache when a session ends
+   * (`SnapshotStore.release`). Adapters with no caching can omit.
+   */
+  clearSubagentCache?(sessionId: string): void;
 }

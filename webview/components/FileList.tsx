@@ -1,7 +1,10 @@
 import { Virtuoso } from 'react-virtuoso';
 import type { FileReview } from '../../src/types';
 import { useUi } from '../store';
+import { truncate } from '../utils/truncate';
 import styles from '../styles/FileList.module.css';
+
+const SUBAGENT_CHIP_MAX = 32;
 
 interface Props {
   files: FileReview[];
@@ -60,6 +63,15 @@ function FileRow({ file, selected, onSelect }: { file: FileReview; selected: boo
         {file.isNew ? <span className={styles.tag}>NEW</span> : null}
         {file.isDeleted ? <span className={styles.tag}>DEL</span> : null}
         {file.isBinary ? <span className={styles.tag}>BIN</span> : null}
+        {file.subagentId ? (
+          <span
+            className={styles.subagentChip}
+            title={`Produced by Task: ${file.subagentId}`}
+            aria-label={`Produced by Task: ${file.subagentId}`}
+          >
+            via {truncate(file.subagentId, SUBAGENT_CHIP_MAX)}
+          </span>
+        ) : null}
         {counts.pending > 0 ? <span className={styles.pendingPill}>{counts.pending}</span> : null}
       </span>
     </button>

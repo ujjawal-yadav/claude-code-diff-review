@@ -174,9 +174,20 @@ describe('ClaudeCodeAdapter — resolveTranscriptPath (M9.5)', () => {
   });
 });
 
-describe('ClaudeCodeAdapter — extractSubagentId (M9.6 placeholder)', () => {
-  it('returns null until M9.6 lands', () => {
-    expect(adapter.extractSubagentId(validPreEdit)).toBeNull();
+describe('ClaudeCodeAdapter — extractSubagentId (M9.6)', () => {
+  it('resolves null when the session has no transcript on disk', async () => {
+    // validPreEdit references a synthetic session_id; no transcript exists.
+    await expect(adapter.extractSubagentId(validPreEdit)).resolves.toBeNull();
+  });
+
+  it('rejects malformed payloads with null', async () => {
+    await expect(adapter.extractSubagentId(null)).resolves.toBeNull();
+    await expect(adapter.extractSubagentId({})).resolves.toBeNull();
+    await expect(adapter.extractSubagentId({ session_id: 's', /* no cwd */ })).resolves.toBeNull();
+  });
+
+  it('clearSubagentCache is callable without crashing', () => {
+    expect(() => adapter.clearSubagentCache?.('s')).not.toThrow();
   });
 });
 

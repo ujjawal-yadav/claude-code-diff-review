@@ -9,6 +9,12 @@ interface Props {
   viewType: 'split' | 'unified';
   selected: boolean;
   onSelect(hunkIndex: number): void;
+  /**
+   * M9.6: file-level sub-agent attribution. When non-null, the hunk
+   * header tooltip surfaces the full Task description. File-level, not
+   * hunk-level, so all hunks of a file share the same attribution.
+   */
+  subagentId?: string;
 }
 
 /**
@@ -22,7 +28,7 @@ interface Props {
  * full keyboard control, predictable accessibility, no library version drift.
  * The `viewType` prop is wired so a future swap is local to this component.
  */
-export function HunkBlock({ filePath, hunk, viewType, selected, onSelect }: Props): JSX.Element {
+export function HunkBlock({ filePath, hunk, viewType, selected, onSelect, subagentId }: Props): JSX.Element {
   const decided = hunk.status !== 'pending';
   const openChat = useUi((s) => s.openChat);
   const cls = [styles.root, selected ? styles.selected : '', styles[`status_${hunk.status}`] ?? ''].filter(Boolean).join(' ');
@@ -33,7 +39,10 @@ export function HunkBlock({ filePath, hunk, viewType, selected, onSelect }: Prop
       onMouseDown={() => onSelect(hunk.index)}
       aria-labelledby={`hunk-header-${hunk.index}`}
     >
-      <header className={styles.header}>
+      <header
+        className={styles.header}
+        title={subagentId ? `Produced by Task: ${subagentId}` : undefined}
+      >
         <code id={`hunk-header-${hunk.index}`} className={styles.hunkHeader}>{hunk.header}</code>
         <div className={styles.actions} role="group" aria-label="Hunk actions">
           <button

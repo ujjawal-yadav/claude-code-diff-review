@@ -96,6 +96,12 @@ export interface ReconstructedFileReview {
   isNew: boolean;
   isDeleted: boolean;
   isBinary: boolean;
+  /**
+   * M9.6 (Wave 4): sub-agent attribution preserved across replay. `undefined`
+   * for files edited directly by the main agent OR for events written before
+   * Wave 4 (forward-compat).
+   */
+  subagentId?: string;
   /** Hunks the original turn produced — index-stable. */
   hunks: Array<{
     index: number;

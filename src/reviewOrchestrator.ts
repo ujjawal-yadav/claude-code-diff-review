@@ -89,6 +89,12 @@ export interface OrchestratorOptions {
    * dispatch on incoming agentId from the adapter layer.
    */
   agentId?: 'claude-code' | 'opencode';
+  /**
+   * M9.6: fired AFTER a session has been removed from orchestrator state.
+   * Used by extension.ts to clear adapter-level per-session caches (e.g.
+   * the sub-agent task cache) so memory stays bounded.
+   */
+  onDismissSession?: (sessionId: string) => void;
 }
 
 export class ReviewOrchestrator {
@@ -416,6 +422,7 @@ export class ReviewOrchestrator {
         { srcTurnId, srcEventId: -1, path: file.relPath, hunkIdx: hunkIndex },
         new Map([[absFile, outcome.content]]),
         () => file.relPath,
+        file.subagentId,
       );
 
       this.opts.logger.info('orchestrator', 'hunk.undone', {
@@ -432,6 +439,7 @@ export class ReviewOrchestrator {
     this.unindexHunkSets(sid);
     this.undoStack.delete(sid);
     this.opts.store.release(sid);
+    try { this.opts.onDismissSession?.(sid); } catch { /* never throw to caller */ }
     this.opts.logger.info('orchestrator', 'session.dismissed', { sid });
     this.notifyChange();
   }
@@ -541,13 +549,18 @@ export class ReviewOrchestrator {
     // Seed SnapshotStore FIRST so a racing PreToolUse reads the historical
     // `before` content and not the on-disk mutated state.
     const originals = new Map<AbsPath, string>();
+    const subagentIdByPath = new Map<AbsPath, string | null>();
     for (const f of reconstructed.files) {
-      originals.set(asAbsPath(f.filePath), f.before);
+      const abs = asAbsPath(f.filePath);
+      originals.set(abs, f.before);
+      // M9.6: preserve sub-agent attribution per file across reconstruction.
+      subagentIdByPath.set(abs, f.subagentId ?? null);
     }
     this.opts.store.injectSession({
       sessionId: sid,
       cwd: reconstructed.cwd,
       originals,
+      subagentIdByPath,
       // Re-open the prior turn — decisions append under the original turnId.
       // (Architectural decision #8 in the plan.)
       currentTurnId: reconstructed.turnId,
@@ -587,6 +600,7 @@ export class ReviewOrchestrator {
         isDeleted: f.isDeleted,
         isBinary: f.isBinary,
         warnings,
+        ...(f.subagentId ? { subagentId: f.subagentId } : {}),
       };
       return fileReview;
     });
@@ -758,7 +772,11 @@ export class ReviewOrchestrator {
         this.opts.logger.debug('orchestrator', 'open.skip-no-changes', { absPath });
         continue;
       }
-      files.push(toFileReview(diff, sessionData.cwd, sessionData.overBudget));
+      const fr = toFileReview(diff, sessionData.cwd, sessionData.overBudget);
+      // M9.6: surface the sub-agent that produced this file's edit, if any.
+      const subagentId = sessionData.subagentIdByPath.get(absPath);
+      if (subagentId) fr.subagentId = subagentId;
+      files.push(fr);
     }
 
     const review: SessionReview = {
@@ -923,6 +941,14 @@ export class ReviewOrchestrator {
     },
     postContents: Map<AbsPath, string>,
     relPathByAbs: (abs: AbsPath) => string,
+    /**
+     * M9.6 audit-gap fix: the sub-agent attribution for the file(s) being
+     * undone. Without this, reconstruction loses attribution as soon as
+     * any decision is undone — same shape of bug as β.0's missing
+     * `lastTurnId`. The history layer's `recordUndo` input already
+     * supports `subagentId`; we just need to pass it through.
+     */
+    subagentId?: string,
   ): void {
     const history = this.opts.history;
     if (!history) return;
@@ -946,6 +972,7 @@ export class ReviewOrchestrator {
       sessionId: sid,
       turnId,
       agentId: this.agentId,
+      ...(subagentId ? { subagentId } : {}),
       scope,
       target: targetClean,
       postContents: postRecord,
@@ -1001,6 +1028,8 @@ export class ReviewOrchestrator {
           isNew: f.isNew,
           isDeleted: f.isDeleted,
           isBinary: f.isBinary,
+          // M9.6: file-level sub-agent attribution from the live FileReview.
+          ...(f.subagentId ? { subagentId: f.subagentId } : {}),
           hunks: f.hunks.map((h) => ({
             idx: h.index,
             oldStart: h.oldStart,
@@ -1189,12 +1218,24 @@ export class ReviewOrchestrator {
         if (relPath !== undefined) target.path = relPath;
       }
       // For 'turn' scope (bulk-session), omit path/hunkIdx — multiple files.
+      // M9.6 audit-gap fix: pass per-event subagentId for single-file scopes;
+      // omit for turn-scoped (the canonical per-file attribution lives on
+      // turn-stopped's `files[i].subagentId` for multi-file turns).
+      let undoSubagentId: string | undefined;
+      if (undoScope === 'hunk' || undoScope === 'file') {
+        const [absFile] = undoPostContents.keys();
+        if (absFile !== undefined) {
+          const fr = this.getFile(sid, absFile);
+          if (fr?.subagentId) undoSubagentId = fr.subagentId;
+        }
+      }
       this.recordUndoEvent(
         sid,
         undoScope,
         target,
         undoPostContents,
         (abs) => undoRelPaths.get(abs) ?? abs,
+        undoSubagentId,
       );
     }
 

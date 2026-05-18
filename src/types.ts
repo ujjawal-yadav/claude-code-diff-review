@@ -52,6 +52,13 @@ export interface SessionData {
    * `currentTurnId ?? lastTurnId ?? sessionId` (synthetic fallback).
    */
   lastTurnId: string | null;
+  /**
+   * M9.6 (Wave 4): which sub-agent (Claude Code Task tool) produced each
+   * file edit. First-write-wins, like `originals`. `null` means the main
+   * agent edited the file directly. Populated by `captureOriginal` and
+   * `recordTouched` when the caller passes a non-null subagentId.
+   */
+  subagentIdByPath: Map<AbsPath, string | null>;
 }
 
 export interface ConversationEntry {
@@ -141,6 +148,16 @@ export interface FileReview {
   isDeleted: boolean;
   isBinary: boolean;
   warnings: FileWarning[];
+  /**
+   * M9.6 (Wave 4): identifier of the sub-agent (Claude Code Task tool)
+   * that produced this file's edit. `undefined` when no sub-agent was
+   * involved (main agent edited directly). Surfaced in the file-list
+   * chip and hunk header tooltip. File-level only — not on HunkReview
+   * (Task tool boundary is at the tool-call level, one Task → one file
+   * edit). Propagates through the event log so reconstructed sessions
+   * preserve attribution.
+   */
+  subagentId?: string;
 }
 
 export interface SessionReview {

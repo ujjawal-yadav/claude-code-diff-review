@@ -1,4 +1,5 @@
 import type { SessionIndexEntry } from '../../../src/history/historyTypes.js';
+import { truncate } from '../../utils/truncate.js';
 
 interface SessionListProps {
   sessions: SessionIndexEntry[] | null;
@@ -70,10 +71,6 @@ function relative(ts: number): string {
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h ago`;
   return `${Math.floor(h / 24)}d ago`;
-}
-
-function truncate(s: string, max: number): string {
-  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }
 
 function statusStyle(status: SessionIndexEntry['status']): React.CSSProperties {

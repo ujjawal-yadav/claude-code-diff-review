@@ -86,6 +86,7 @@ export function DiffPane({ file }: Props): JSX.Element {
               viewType={viewType}
               selected={selectedHunk === h.index}
               onSelect={selectHunk}
+              {...(file.subagentId ? { subagentId: file.subagentId } : {})}
             />
           ))}
         </div>

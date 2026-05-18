@@ -182,6 +182,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       codeLens?.refresh();
       pendingStatusBar?.scheduleRefresh();
     },
+    onDismissSession: (sid) => {
+      // M9.6: free the per-session sub-agent cache.
+      claudeAdapter.clearSubagentCache?.(sid);
+    },
     ...(history ? { history } : {}),
     agentId: 'claude-code',
   });
@@ -232,11 +236,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const onPreToolUse = async (p: PreToolUsePayload) => {
     const norm = claudeAdapter.parsePreToolUse(p);
     if (!norm || !norm.filePath) return;
+    // M9.6: resolve sub-agent attribution from the transcript. Async because
+    // the first call per session reads the JSONL; subsequent calls hit the
+    // adapter's cache and return in sub-ms. `null` is the normal case for
+    // edits the main agent made directly.
+    const subagentId = await claudeAdapter.extractSubagentId(p);
     // Phase α Track 6 + Track 1: mint a turn id if this is the first edit of
     // a new turn, capture the before-snapshot, and emit `turn-started` into
     // the event log on freshly-minted turns. All best-effort.
     const turnInfo = store.beginTurnIfNeeded(norm.sessionId, norm.cwd, norm.agentId);
-    const resolved = await store.captureOriginal(norm.sessionId, norm.cwd, norm.filePath, norm.agentId);
+    const resolved = await store.captureOriginal(
+      norm.sessionId, norm.cwd, norm.filePath, norm.agentId, subagentId,
+    );
     if (resolved == null) {
       logger?.warn('hooks', 'pre.path-rejected', { sid: norm.sessionId, raw: norm.filePath });
       return;
@@ -252,13 +263,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           beforeContent: before,
           mtimeMs: null,
         }],
+        ...(subagentId ? { subagentId } : {}),
       });
     }
   };
   const onPostToolUse = async (p: PostToolUsePayload) => {
     const norm = claudeAdapter.parsePostToolUse(p);
     if (!norm || !norm.filePath) return;
-    const resolved = store.recordTouched(norm.sessionId, norm.cwd, norm.filePath, norm.agentId);
+    // M9.6: hit the cache built by PreToolUse for this session — sub-ms.
+    const subagentId = await claudeAdapter.extractSubagentId(p);
+    const resolved = store.recordTouched(
+      norm.sessionId, norm.cwd, norm.filePath, norm.agentId, subagentId,
+    );
     if (resolved == null) {
       logger?.warn('hooks', 'post.path-rejected', { sid: norm.sessionId, raw: norm.filePath });
     }
