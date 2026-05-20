@@ -94,6 +94,10 @@ export const WebviewToHost = z.discriminatedUnion('type', [
     type: z.literal('undo-last-action'),
   }),
   z.object({ type: z.literal('log'), level: z.enum(['debug', 'info', 'warn']), msg: z.string() }),
+  /** v0.2.1: open the history panel from the review-panel header button.
+   *  Host dispatches `claudeReview.openHistory` so a single source of truth
+   *  governs panel lifecycle (matches command-palette entry behaviour). */
+  z.object({ type: z.literal('open-history') }),
 ]);
 export type WebviewToHost = z.infer<typeof WebviewToHost>;
 

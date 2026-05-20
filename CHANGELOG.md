@@ -7,6 +7,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: Se
 
 _No unreleased changes yet._
 
+## [0.2.1] — 2026-05-20
+
+A small post-release polish patch driven by senior-product review of v0.2.0.
+
+### Added
+- **📜 History button in the review panel header.** The History panel is now discoverable from any active review session without the command palette. Backed by a new `open-history` webview-to-host message routed through `claudeReview.openHistory` so panel lifecycle stays single-sourced.
+
+### Changed
+- **Onboarding "Use claude /login" branch** now sets clearer expectations: "Run `claude /login` in any terminal. Once you have, click **Verify Now** — the extension reads `~/.claude/.credentials.json` automatically." A new Verify Now action re-probes the credential resolver and reports detection (with the source) or guides the user to the next option. Previously the message said "no further setup needed" which mis-set expectations if the user forgot to actually run `claude /login`.
+- **README opens audience-first.** New paragraph after the value tagline anchors the user-state ("If you let Claude Code edit dozens of files…") so visitors immediately know if the tool fits their workflow.
+- **README has a Roadmap section** linking to GitHub Issues — signals active development and clarifies what v0.3 / v1.0 will bring.
+- **README "Known limitations"** updated: removed the stale "Sub-agent attribution planned for v1.1" claim (shipped in v0.2). Added "External terminals" entry to acknowledge the env-var inheritance limit + the burst-detector recovery path.
+- **README "Privacy & security"** updated: bearer-token description now reflects keychain persistence + reuse across reloads (was "regenerated per activation" — outdated since the auth-token UX wave).
+
+### Fixed
+_None — no shipped bugs were identified in v0.2.0 post-release. A claimed P0 credential-probe bug was investigated and refuted: the credential resolver is lazy + per-call and already reads `~/.claude/.credentials.json` on first chat use._
+
 ## [0.2.0] — 2026-05-20
 
 A substantial feature release. The headline additions are the **History panel** (every Claude session reviewable any time, with Resume / Rollback / Delete actions), **transcript-aware chat** (hunk chat cites your original prompt and Claude's surrounding tool calls), and **sub-agent attribution** (files edited inside a Task call are labelled with the sub-agent description). Major reliability work too: bearer token now persists across reloads, hooks self-heal stale legacy entries on activation, and a burst-detector toast surfaces actionable recovery on auth failures.

@@ -48,6 +48,15 @@ export function SessionHeader({ session, viewType, banner }: Props): JSX.Element
         >
           ↶ Undo{undoDepth > 0 ? ` (${undoDepth})` : ''}
         </button>
+        {/* v0.2.1: discoverability entry to the History panel. */}
+        <button
+          className={styles.historyButton}
+          onClick={() => send({ type: 'open-history' })}
+          aria-label="Open History Panel"
+          title="Open History Panel — browse past sessions and resume/rollback/delete"
+        >
+          📜 History
+        </button>
       </div>
     </header>
   );

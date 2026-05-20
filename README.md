@@ -9,7 +9,7 @@
 
 ![Per-hunk Accept / Reject / Ask in the editor](https://raw.githubusercontent.com/ujjawal-yadav/claude-code-diff-review/main/assets/feature.png)
 
-Claude Code can autonomously edit dozens of files in a single session. This extension surfaces every change as a session-aware review panel with **per-hunk Accept / Reject / Ask Claude** controls. No git required.
+If you let Claude Code edit dozens of files in a single autonomous turn, you need a way to review each change before keeping it. This extension turns that review into a per-hunk **Accept / Reject / Ask Claude** flow — session-aware, snapshot-backed, no git required.
 
 ---
 
@@ -166,20 +166,30 @@ The server falls back to an OS-assigned dynamic port automatically and rewrites 
 
 ---
 
+## Roadmap
+
+**v0.3** (next minor): review-ergonomics polish — keyboard shortcuts for hunk actions (`a` / `r` / `?` / arrow navigation), a "show pending only" filter, per-session decision summary, and clearer visual separation between the live-pending and recoverable-pending status bar items.
+
+**v1.0** (longer horizon): OpenCode + multi-agent adapter support, external-terminal token resolution (terminals spawned outside VS Code don't currently inherit the env var), multi-root workspace history sharding, Remote/SSH/Dev Container/WSL support.
+
+Feature requests, bug reports, and discussion are welcome at [GitHub Issues](https://github.com/ujjawal-yadav/claude-code-diff-review/issues).
+
+---
+
 ## Known limitations
 
-- **Single workspace folder.** Multi-root workspaces use the first folder for `.claude/settings.json` and history. v1.1 may shard.
-- **Remote / SSH / Dev Container / WSL.** v1.0 is local-only. The hook server binds to `127.0.0.1`; remote development needs the server to live in the remote host. Out of scope for v1.0.
+- **Single workspace folder.** Multi-root workspaces use the first folder for `.claude/settings.json` and history. v1.0 may shard.
+- **Remote / SSH / Dev Container / WSL.** v0.x is local-only. The hook server binds to `127.0.0.1`; remote development needs the server to live in the remote host. Out of scope until v1.0.
+- **External terminals.** Terminals spawned outside VS Code (Windows Terminal, tmux not inside an integrated terminal, etc.) don't inherit the `CLAUDE_REVIEW_TOKEN` env var. The burst-detector toast catches this and offers `[Open New Terminal]` in-VS-Code. v1.0 plans file-based token resolution to fix this fully.
 - **Claude Code version.** Requires Claude Code ≥ 2.1.47 for `last_assistant_message` and `stop_hook_active` fields in the Stop hook payload.
-- **Sub-agent attribution.** Claude Code sub-agents share the parent session ID; per-sub-agent attribution requires JSONL transcript parsing. Planned for v1.1.
-- **Localisation.** English only in v1.0.
+- **Localisation.** English only.
 
 ---
 
 ## Privacy & security
 
 - **API keys / OAuth tokens** are stored exclusively in VS Code's `SecretStorage` (OS-keychain backed). They never cross into the webview, never appear in logs, and never get written to a file.
-- **Loopback server** binds to `127.0.0.1` only. Bearer authentication uses a 256-bit token, regenerated per activation, compared in constant time.
+- **Loopback server** binds to `127.0.0.1` only. Bearer authentication uses a 256-bit token, stored in OS keychain (`SecretStorage`), reused across reloads, compared in constant time. Explicit rotation available via `Claude Review: Rotate Bearer Token`.
 - **Webview CSP** sets `connect-src 'none'` — the webview cannot make network calls. All chat traffic flows through the extension host.
 - **Telemetry** is opt-in (`claudeReview.telemetry`) and additionally gated by VS Code's global telemetry setting. Events are scrubbed for PII (file paths, message content, tokens) before emission.
 

@@ -240,6 +240,12 @@ export class ReviewPanelManager implements PanelGateway {
       case 'use-claude-code-auth':
         await vscode.commands.executeCommand('claudeReview.useClaudeCodeAuth');
         break;
+      case 'open-history':
+        // v0.2.1: History-panel discoverability. The header button in the
+        // webview posts this; we delegate to the same command the palette
+        // uses so panel lifecycle stays single-sourced.
+        await vscode.commands.executeCommand('claudeReview.openHistory');
+        break;
       case 'revert-file-to-snapshot':
         await o.revertFileToSnapshot(sessionId, msg.filePath);
         break;

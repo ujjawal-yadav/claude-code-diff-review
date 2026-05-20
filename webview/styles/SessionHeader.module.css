@@ -39,7 +39,8 @@
 }
 
 .toggle,
-.bulk {
+.bulk,
+.historyButton {
   cursor: pointer;
   padding: 4px 10px;
   border: 1px solid var(--vscode-button-border, transparent);
@@ -50,6 +51,14 @@
 }
 
 .toggle:hover,
-.bulk:hover {
+.bulk:hover,
+.historyButton:hover {
   background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
+}
+
+/* v0.2.1: push the history button to the right end of the action row so it
+   reads as a distinct "secondary navigation" affordance, not another bulk
+   action. `margin-left: auto` works because `.actions` is flex. */
+.historyButton {
+  margin-left: auto;
 }

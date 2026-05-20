@@ -58,11 +58,36 @@ export async function showOnboardingIfNeeded(
     case 'Set API Key':
       await vscode.commands.executeCommand('claudeReview.setApiKey');
       break;
-    case 'Use claude /login':
-      void vscode.window.showInformationMessage(
-        'Run `claude /login` in any terminal. The extension reads `~/.claude/.credentials.json` automatically — no further setup needed.',
+    case 'Use claude /login': {
+      // The previous message said "no further setup needed" — true ONLY if the
+      // user actually runs `claude /login` and the credentials file appears.
+      // When the user forgot or misunderstood, "No Claude credential found"
+      // showed up later at first chat with no link back to this flow.
+      // Set clearer expectations + offer a one-click verify that re-probes.
+      const VERIFY = 'Verify Now';
+      const choice2 = await vscode.window.showInformationMessage(
+        'Run `claude /login` in any terminal. Once you have, click Verify Now — the extension reads `~/.claude/.credentials.json` automatically.',
+        VERIFY,
       );
+      if (choice2 === VERIFY) {
+        const probed = await resolveCredential(
+          { getOAuthToken: () => secrets.getOAuthToken(), getApiKey: () => secrets.getApiKey() },
+          () => { /* swallow; verify path */ },
+        );
+        if (probed) {
+          void vscode.window.showInformationMessage(
+            `Claude credential detected (source: ${probed.source}). Chat is ready to use.`,
+          );
+          logger.info('onboarding', 'verify.success', { source: probed.source });
+        } else {
+          void vscode.window.showWarningMessage(
+            'Still no Claude credential found. If you just ran `claude /login`, check that `~/.claude/.credentials.json` was created. Otherwise use "Set OAuth Token" or "Set API Key" commands.',
+          );
+          logger.info('onboarding', 'verify.failed');
+        }
+      }
       break;
+    }
     default:
       break;
   }

@@ -81,4 +81,18 @@ describe('messages — webview message validation', () => {
     });
     expect(out).toBeNull();
   });
+
+  it('v0.2.1: parses a valid open-history (no payload)', () => {
+    const out = parseWebviewMessage({ type: 'open-history' });
+    expect(out).not.toBeNull();
+    expect(out?.type).toBe('open-history');
+  });
+
+  it('v0.2.1: rejects open-history with unexpected payload fields are ignored as forward-compat', () => {
+    // Zod discriminatedUnion is permissive of extra fields by default; the
+    // type discriminator is what matters. This documents the behaviour rather
+    // than asserts a stricter contract.
+    const out = parseWebviewMessage({ type: 'open-history', stray: 1 });
+    expect(out?.type).toBe('open-history');
+  });
 });
