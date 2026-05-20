@@ -1,4 +1,7 @@
 import * as vscode from 'vscode';
+import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
+import * as crypto from 'node:crypto';
 
 import { Logger, LogLevel } from './logger.js';
 import { SecretManager } from './secretManager.js';
@@ -11,6 +14,7 @@ import { ReviewOrchestrator } from './reviewOrchestrator.js';
 import { ReviewPanelManager } from './reviewPanel.js';
 import { StatusBarController } from './statusBarController.js';
 import { PendingStatusBar } from './pendingStatusBar.js';
+import { AuthFailureBurstDetector } from './authFailureBurstDetector.js';
 import { ClaudeReviewScmProvider } from './scmProvider.js';
 import { AnthropicClient } from './anthropicClient.js';
 import { ChatService } from './chatService.js';
@@ -57,25 +61,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
 
   const secrets = new SecretManager(context.secrets);
-  const bearerToken = await secrets.rotateBearerToken();
-  logger.debug('extension', 'bearer.rotated');
+  // 2026-05-19: switched from `rotateBearerToken` (per-activation rotation,
+  // breaks every existing terminal on reload) to `getOrCreateBearerToken`
+  // (stable token reused across activations; keychain-backed). Pair with
+  // `persistent = true` below so VS Code restores the env var on window
+  // reload too. Explicit rotation is still available via the
+  // `claudeReview.rotateBearerToken` command for the rare case it's needed.
+  const bearerToken = await secrets.getOrCreateBearerToken();
+  logger.debug('extension', 'bearer.resolved');
 
   // Make the bearer token visible to Claude Code in any terminal VS Code
-  // spawns. Without this, Claude Code's `$CLAUDE_REVIEW_TOKEN` substitution
-  // resolves to empty and the loopback server returns 401.
-  //
-  // `persistent: false` means the var doesn't survive a VS Code reload —
-  // correct, since we rotate the token per activation. Existing terminals
-  // won't see the new value; the user must reopen them. We surface this
-  // as an info toast on activation if any terminal is already open.
-  context.environmentVariableCollection.persistent = false;
+  // spawns. With `persistent = true`, the value is restored on window
+  // reload so terminals from prior sessions also stay aligned. The only
+  // failure mode left is a terminal opened BEFORE the extension first
+  // activated on this machine — the burst detector wired below catches
+  // that case at the moment of the first 401 and offers one-click recovery.
+  context.environmentVariableCollection.persistent = true;
   context.environmentVariableCollection.description = 'Claude Code Review: bearer token for the local hook server.';
   context.environmentVariableCollection.replace('CLAUDE_REVIEW_TOKEN', bearerToken);
-  if (vscode.window.terminals.length > 0) {
-    vscode.window.showInformationMessage(
-      'Claude Code Review: close and reopen any open terminal so it picks up the auth token, then run `claude`.',
-    );
-  }
 
   const preferredPort = config.get<number>('port') ?? 53117;
 
@@ -220,6 +223,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // event log (distinct from `statusBar` which tracks live-session counts).
   if (history) {
     pendingStatusBar = new PendingStatusBar(context, history, logger);
+    // Live-update wiring (2026-05-19): the orchestrator's onChange only fires
+    // for live workspace sessions, so a session whose activity ends before
+    // the panel sees it would never update the status bar. Subscribing to
+    // HistoryService.addChangeListener catches every event-log write,
+    // independent of the orchestrator's in-memory state. PendingStatusBar's
+    // internal 1s debounce + the 1s TTL cache on getPendingReviewsSummary
+    // absorb burst writes without an extra layer of throttling here.
+    const unsubscribePending = history.addChangeListener(() => {
+      pendingStatusBar?.scheduleRefresh();
+    });
+    context.subscriptions.push({ dispose: () => unsubscribePending() });
   }
   let scm: ClaudeReviewScmProvider | undefined;
   const lazyScm = () => {
@@ -302,7 +316,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }, 300);
   };
 
-  server = await startServer({ preferredPort, bearerToken, logger, onPreToolUse, onPostToolUse, onStop });
+  // Burst-detector toast for hook auth failures. Fires when ≥3 401s land
+  // within a 10s sliding window (cooldown 60s after a fire). Subscribes to
+  // the server's `onAuthFailure` channel — see `src/server.ts:onRequest`.
+  const authFailureDetector = new AuthFailureBurstDetector({ logger });
+  context.subscriptions.push({ dispose: () => authFailureDetector.dispose() });
+
+  server = await startServer({
+    preferredPort, bearerToken, logger,
+    onPreToolUse, onPostToolUse, onStop,
+    onAuthFailure: () => authFailureDetector.record(),
+  });
   context.subscriptions.push({ dispose: () => server?.dispose() });
 
   // Deferred off the activation hot path. The hook config file only needs
@@ -346,7 +370,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (choice === 'Migrate to user scope') {
         try {
           await removeHookConfig({ workspaceRoot: root, scope: 'workspace' });
-          await ensureHooksInstalled({ workspaceRoot: root, port: server!.port, scope: 'user' });
+          await ensureHooksInstalled({ workspaceRoot: root, port: server!.port, scope: 'user', ...(logger ? { logger } : {}) });
           void vscode.window.showInformationMessage('Claude Review: hooks migrated to ~/.claude/settings.json.');
           await context.globalState.update(MIGRATION_FLAG, true);
         } catch (err) {
@@ -363,7 +387,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (installScope === 'workspace' && !root) {
     logger.warn('extension', 'no-workspace', { msg: 'workspace install scope but no folder open; hooks not installed' });
   } else {
-    void ensureHooksInstalled({ workspaceRoot: root, port: server.port, scope: installScope })
+    void ensureHooksInstalled({ workspaceRoot: root, port: server.port, scope: installScope, logger })
       .then(() => logger?.info('extension', 'hooks.installed', { port: server!.port, scope: installScope }))
       .catch((err) => {
         logger?.error('extension', 'hooks.install.failed', { err: String(err), scope: installScope });
@@ -409,7 +433,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       try {
         await removeHookConfig({ workspaceRoot: r, scope: currentScope });
-        await ensureHooksInstalled({ workspaceRoot: r, port: server!.port, scope: nextScope });
+        await ensureHooksInstalled({ workspaceRoot: r, port: server!.port, scope: nextScope, ...(logger ? { logger } : {}) });
         const target = nextScope === 'workspace'
           ? vscode.ConfigurationTarget.Workspace
           : vscode.ConfigurationTarget.Global;
@@ -421,10 +445,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.window.showErrorMessage(`Switch scope failed: ${(err as Error).message}`);
       }
     }),
-    vscode.commands.registerCommand('claudeReview.rotateBearerToken', async () => {
-      await secrets.rotateBearerToken();
-      vscode.window.showInformationMessage('Claude Code Review: bearer token rotated. Reload window to apply.');
-    }),
+    vscode.commands.registerCommand('claudeReview.rotateBearerToken', () =>
+      rotateBearerTokenAndPromptReload({
+        secrets,
+        envCollection: context.environmentVariableCollection,
+        ...(logger ? { logger } : {}),
+        showInfo: (msg, ...actions) =>
+          Promise.resolve(vscode.window.showInformationMessage(msg, ...actions)),
+        executeCommand: (cmd) => {
+          void vscode.commands.executeCommand(cmd);
+        },
+      }),
+    ),
     vscode.commands.registerCommand('claudeReview.setApiKey', async () => {
       const key = await vscode.window.showInputBox({
         prompt: 'Enter your Anthropic API key',
@@ -592,7 +624,7 @@ function humanizeAgoForPrompt(ts: number): string {
  */
 function relPathFromCwd(cwd: string, absPath: string): string {
   try {
-    const rel = require('node:path').relative(cwd, absPath);
+    const rel = path.relative(cwd, absPath);
     if (!rel || rel.startsWith('..')) return absPath;
     return rel.replace(/\\/g, '/');
   } catch {
@@ -609,8 +641,6 @@ function relPathFromCwd(cwd: string, absPath: string): string {
  * outside the project tree under `~/.claude/`.
  */
 async function maybePromptGitignore(workspaceRoot: string, logger: Logger): Promise<boolean> {
-  const fs = await import('node:fs/promises');
-  const path = await import('node:path');
   const gitignorePath = path.join(workspaceRoot, '.gitignore');
   let current: string;
   try {
@@ -629,7 +659,12 @@ async function maybePromptGitignore(workspaceRoot: string, logger: Logger): Prom
   if (choice === 'Add to .gitignore') {
     try {
       const newline = current.endsWith('\n') ? '' : '\n';
-      await fs.writeFile(gitignorePath, `${current}${newline}${ENTRY}\n`, 'utf8');
+      const next = `${current}${newline}${ENTRY}\n`;
+      // Atomic write: tmp + rename. Direct fs.writeFile is non-atomic — a
+      // concurrent editor (or a crash mid-write) could truncate the file.
+      const tmp = `${gitignorePath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+      await fs.writeFile(tmp, next, 'utf8');
+      await fs.rename(tmp, gitignorePath);
       void vscode.window.showInformationMessage('.gitignore updated.');
       logger.info('history', 'gitignore.injected');
     } catch (err) {
@@ -637,6 +672,34 @@ async function maybePromptGitignore(workspaceRoot: string, logger: Logger): Prom
     }
   }
   return true; // prompt was shown; suppress future prompts
+}
+
+/**
+ * Body of the `claudeReview.rotateBearerToken` command, extracted so it
+ * can be unit-tested without going through `vscode.commands.registerCommand`.
+ *
+ * The running server captures `expectedToken` as a Buffer at start time —
+ * rotation invalidates that immediately, so terminals using the new token
+ * would 401 against the still-running server. Hence the reload prompt.
+ */
+export async function rotateBearerTokenAndPromptReload(deps: {
+  secrets: { rotateBearerToken(): Promise<string> };
+  envCollection: { replace(name: string, value: string): void };
+  logger?: { info(src: string, evt: string, props?: Record<string, unknown>): void };
+  showInfo: (msg: string, ...actions: string[]) => Promise<string | undefined>;
+  executeCommand: (cmd: string) => void;
+}): Promise<void> {
+  const fresh = await deps.secrets.rotateBearerToken();
+  deps.envCollection.replace('CLAUDE_REVIEW_TOKEN', fresh);
+  deps.logger?.info('extension', 'bearer.rotated');
+  const RELOAD = 'Reload Window';
+  const choice = await deps.showInfo(
+    'Claude Code Review: bearer token rotated. Reload the window so the hook server picks up the new value, then open a fresh terminal.',
+    RELOAD,
+  );
+  if (choice === RELOAD) {
+    deps.executeCommand('workbench.action.reloadWindow');
+  }
 }
 
 export async function deactivate(): Promise<void> {

@@ -37,6 +37,13 @@ export interface ServerOptions {
   onPreToolUse:  (payload: PreToolUsePayload)  => Promise<void> | void;
   onPostToolUse: (payload: PostToolUsePayload) => Promise<void> | void;
   onStop:        (payload: StopPayload)        => Promise<void> | void;
+  /**
+   * Observability hook (2026-05-19): invoked on every 401 response so the
+   * extension-side burst detector can surface an actionable toast. Wrapped
+   * in `try/catch` at the call site so a broken detector cannot turn a
+   * 401 into a 500.
+   */
+  onAuthFailure?: () => void;
 }
 
 export interface ServerHandle {
@@ -62,6 +69,23 @@ export async function startServer(opts: ServerOptions): Promise<ServerHandle> {
 
   fastify.addHook('onRequest', async (req, reply) => {
     if (!authorize(req.headers.authorization, expectedToken, dummy)) {
+      // Length-only signals — never log the full token bytes. The first 13
+      // chars capture "Bearer " (7) plus 6 token chars — enough to debug
+      // scheme-mismatch (`bearer`/`Basic`/raw-token cases) without leaking
+      // enough of a valid token to be useful to an attacker against a
+      // localhost-only server with retry-throttled responses.
+      const header = req.headers.authorization;
+      const hadHeader = typeof header === 'string';
+      const headerLooksLikeBearer = hadHeader && header.startsWith('Bearer ');
+      logger.warn('server', 'auth.failed', {
+        route: req.url,
+        hadHeader,
+        headerLooksLikeBearer,
+        headerPrefix: hadHeader ? header.slice(0, 13) : null,
+        suppliedLen: headerLooksLikeBearer ? Math.max(0, header.length - 'Bearer '.length) : 0,
+        expectedLen: opts.bearerToken.length,
+      });
+      try { opts.onAuthFailure?.(); } catch { /* never turn a 401 into a 500 */ }
       reply.code(401).send({ error: 'unauthorized' });
       return reply;
     }

@@ -74,6 +74,16 @@ export class HistoryWriter {
       const line = JSON.stringify(fullEvent) + '\n';
       const lineBytes = Buffer.byteLength(line, 'utf8');
 
+      // Defensive: a single event that exceeds the segment cap would otherwise
+      // be written into a fresh segment in violation of the invariant. Reject
+      // pathological events (e.g., a Stop with a several-MB lastAssistantMessage)
+      // up-front so reads + size accounting stay consistent.
+      if (lineBytes > MAX_SEGMENT_BYTES) {
+        throw new Error(
+          `historyWriter: event '${(event as { kind: string }).kind}' exceeds MAX_SEGMENT_BYTES (${lineBytes} > ${MAX_SEGMENT_BYTES})`,
+        );
+      }
+
       if (state.bytesInSegment + lineBytes > MAX_SEGMENT_BYTES && state.bytesInSegment > 0) {
         state.segment += 1;
         state.bytesInSegment = 0;

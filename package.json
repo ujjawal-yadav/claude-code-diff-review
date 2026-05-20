@@ -21,6 +21,7 @@
   "homepage": "https://github.com/ujjawal-yadav/claude-code-diff-review#readme",
   "qna": "marketplace",
   "pricing": "Free",
+  "icon": "assets/icon.png",
   "galleryBanner": {
     "color": "#1F2937",
     "theme": "dark"
@@ -47,7 +48,6 @@
         "claudeReview.installScope":            { "type": "string",  "default": "user",       "enum": ["user", "workspace"], "description": "Where to install Claude Code hooks. `user` (default) writes to ~/.claude/settings.json so every project picks them up automatically. `workspace` writes to <workspace>/.claude/settings.json — per-project. Use the 'Switch Install Scope' command to toggle." },
         "claudeReview.history.enabled":         { "type": "boolean", "default": true,         "description": "Persist every Claude Code turn (started, stopped, hunk decisions) to a content-addressed event log. Powers the History panel and crash recovery. Disable to opt out entirely; existing logs are not deleted." },
         "claudeReview.history.retentionDays":   { "type": "number",  "default": 30,           "description": "Number of days to retain Memory Design event log sessions. The retention sweeper removes older sessions + their unreferenced blobs every 10 minutes." },
-        "claudeReview.history.crossTurnUndo":   { "type": "boolean", "default": false,        "description": "Phase α Q2.3: enable cross-turn undo in the History panel (developer-mode flag). Within-turn undo (↶ on decided hunks) is always on. Cross-turn undo uses rebase semantics and may cascade — gated behind this flag in v0.2 until real-world data informs the safer default." },
         "claudeReview.crashRecoveryToast.enabled": { "type": "boolean", "default": true,      "description": "Deprecated in v0.3 — superseded by the status-bar pending-reviews indicator. When true, surfaces a one-time toast on activation if any session has an open turn within the last 7 days. The status bar covers a strict superset of this case; the toast is retained for one release to ease the v0.2 → v0.3 transition. Default will flip to false in v0.4." },
         "claudeReview.chat.transcriptContext":  { "type": "boolean", "default": true,         "description": "Inject Claude Code's transcript context (the user's original prompt + Claude's surrounding tool calls) into hunk chat queries. Off → chat sees only the hunk diff. Transcript content is read host-side only and never forwarded to the webview." },
         "claudeReview.port":                    { "type": "number",  "default": 53117,        "description": "Preferred loopback port. 0 = always dynamic." },
@@ -57,7 +57,6 @@
         "claudeReview.chatMaxTokens":           { "type": "number",  "default": 2048,         "description": "Maximum output tokens per chat response." },
         "claudeReview.maxSessionBytes":         { "type": "number",  "default": 52428800,     "description": "Maximum bytes of original-file snapshots retained per session." },
         "claudeReview.maxFilesPerSession":      { "type": "number",  "default": 200,          "description": "Maximum files tracked per session." },
-        "claudeReview.rotateTokenOnDeactivate": { "type": "boolean", "default": true,         "description": "Rotate the loopback bearer token when the extension deactivates." },
         "claudeReview.telemetry":               { "type": "string",  "default": "off",        "enum": ["on", "off"], "description": "Opt in to anonymous usage telemetry. Also gated by VS Code's global telemetry setting." },
         "claudeReview.logLevel":                { "type": "string",  "default": "info",       "enum": ["debug", "info", "warn", "error"], "description": "Output channel verbosity." }
       }

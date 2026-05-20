@@ -50,19 +50,35 @@ export class HistoryIndexFile {
   }
 
   /**
+   * Serialises concurrent `update` calls. Without this, two callers each
+   * read the same in-memory snapshot, both mutate, and the second write
+   * silently clobbers the first's mutations. Promise-chain pattern is
+   * the same shape `historyWriter.ts:locked()` uses.
+   */
+  private writeLock: Promise<void> = Promise.resolve();
+
+  /**
    * Apply a mutation to the index and persist atomically. Caller passes
    * a mutator that returns the new state (or mutates in place and returns
    * undefined). Throws if the write fails — caller decides whether to
    * surface or swallow.
    */
   async update(mutate: (idx: HistoryIndex) => HistoryIndex | void): Promise<void> {
-    const idx = await this.read();
-    const next = mutate(idx) ?? idx;
-    await fs.mkdir(path.dirname(this.indexPath), { recursive: true });
-    const tmp = `${this.indexPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify(next, null, 2) + '\n', { encoding: 'utf8', mode: 0o644 });
-    await fs.rename(tmp, this.indexPath);
-    this.cache = next;
+    const previous = this.writeLock;
+    let release!: () => void;
+    this.writeLock = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      await previous;
+      const idx = await this.read();
+      const next = mutate(idx) ?? idx;
+      await fs.mkdir(path.dirname(this.indexPath), { recursive: true });
+      const tmp = `${this.indexPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+      await fs.writeFile(tmp, JSON.stringify(next, null, 2) + '\n', { encoding: 'utf8', mode: 0o644 });
+      await fs.rename(tmp, this.indexPath);
+      this.cache = next;
+    } finally {
+      release();
+    }
   }
 
   /** Helper: upsert by sessionId. */

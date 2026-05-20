@@ -69,6 +69,201 @@ describe('server — auth', () => {
   });
 });
 
+describe('server — auth.failed observability (2026-05-19)', () => {
+  it('logs auth.failed at warn level and invokes onAuthFailure on 401', async () => {
+    // Boot a separate server so we can spy on logger + capture callback fires.
+    const logger = new Logger('test', 'warn');
+    const warnSpy = ((): { calls: Array<[string, string, Record<string, unknown> | undefined]> } => {
+      const calls: Array<[string, string, Record<string, unknown> | undefined]> = [];
+      const original = logger.warn.bind(logger);
+      logger.warn = ((src: string, evt: string, props?: Record<string, unknown>) => {
+        calls.push([src, evt, props]);
+        return original(src, evt, props);
+      }) as typeof logger.warn;
+      return { calls };
+    })();
+    let authFailureFires = 0;
+    const handle = await startServer({
+      preferredPort: 0,
+      bearerToken: TOKEN,
+      logger,
+      onPreToolUse: () => {},
+      onPostToolUse: () => {},
+      onStop: () => {},
+      onAuthFailure: () => { authFailureFires++; },
+    });
+    try {
+      const base = `http://127.0.0.1:${handle.port}`;
+      // 1. No header
+      await fetch(`${base}/pre-tool-use`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+      // 2. Malformed header (no "Bearer " prefix)
+      await fetch(`${base}/pre-tool-use`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: 'bogus' },
+        body: '{}',
+      });
+      // 3. Wrong token (correct Bearer prefix)
+      await fetch(`${base}/pre-tool-use`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: 'Bearer ' + 'b'.repeat(64) },
+        body: '{}',
+      });
+
+      // Three failures → three warn calls + three callback invocations.
+      const authLogs = warnSpy.calls.filter(([src, evt]) => src === 'server' && evt === 'auth.failed');
+      expect(authLogs.length).toBe(3);
+      expect(authFailureFires).toBe(3);
+
+      // Schema of the log payload — length-only, never the bytes.
+      const [src1, evt1, props1] = authLogs[0]!;
+      expect(src1).toBe('server');
+      expect(evt1).toBe('auth.failed');
+      expect(props1).toMatchObject({
+        route: '/pre-tool-use',
+        hadHeader: false,
+        headerLooksLikeBearer: false,
+        headerPrefix: null,
+        suppliedLen: 0,
+        expectedLen: TOKEN.length,
+      });
+
+      // Second call: header present but not a bearer (literal "bogus").
+      expect(authLogs[1]![2]).toMatchObject({
+        hadHeader: true,
+        headerLooksLikeBearer: false,
+        headerPrefix: 'bogus',
+        suppliedLen: 0,
+      });
+
+      // Third call: bearer prefix present, supplied len matches the 64-char token.
+      const third = authLogs[2]![2] as Record<string, unknown>;
+      expect(third).toMatchObject({
+        hadHeader: true,
+        headerLooksLikeBearer: true,
+        suppliedLen: 64,
+        expectedLen: 64,
+      });
+      // First 13 chars = "Bearer " + 6 token bytes. Verify shape, not exact bytes.
+      expect(third.headerPrefix).toMatch(/^Bearer [a-z]{6}$/);
+    } finally {
+      await handle.dispose();
+    }
+  });
+
+  it('truncates headerPrefix correctly when header is shorter than 13 chars', async () => {
+    const logger = new Logger('test', 'warn');
+    const warnCalls: Array<[string, string, Record<string, unknown> | undefined]> = [];
+    const original = logger.warn.bind(logger);
+    logger.warn = ((src: string, evt: string, props?: Record<string, unknown>) => {
+      warnCalls.push([src, evt, props]);
+      return original(src, evt, props);
+    }) as typeof logger.warn;
+
+    const handle = await startServer({
+      preferredPort: 0, bearerToken: TOKEN, logger,
+      onPreToolUse: () => {}, onPostToolUse: () => {}, onStop: () => {},
+    });
+    try {
+      const base = `http://127.0.0.1:${handle.port}`;
+      // Header "Bearer x" — 8 chars, DOES start with "Bearer ", token portion
+      // is 1 char. slice(0, 13) on 8-char string returns the full 8 chars.
+      await fetch(`${base}/pre-tool-use`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: 'Bearer x' },
+        body: '{}',
+      });
+      // Single-char header.
+      await fetch(`${base}/pre-tool-use`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: 'a' },
+        body: '{}',
+      });
+
+      const authLogs = warnCalls.filter(([s, e]) => s === 'server' && e === 'auth.failed');
+      expect(authLogs.length).toBe(2);
+
+      // "Bearer x" (8 chars) — bearer prefix present, supplied token is 1 char.
+      // slice(0,13) on an 8-char string returns the full string.
+      expect(authLogs[0]![2]).toMatchObject({
+        hadHeader: true,
+        headerLooksLikeBearer: true,
+        headerPrefix: 'Bearer x',
+        suppliedLen: 1,
+        expectedLen: TOKEN.length,
+      });
+      // "a" (1 char) — headerLooksLikeBearer=false (no Bearer prefix).
+      expect(authLogs[1]![2]).toMatchObject({
+        hadHeader: true,
+        headerLooksLikeBearer: false,
+        headerPrefix: 'a',
+        suppliedLen: 0,
+      });
+    } finally {
+      await handle.dispose();
+    }
+  });
+
+  it('does NOT invoke onAuthFailure on a successful (200) request', async () => {
+    const logger = new Logger('test', 'error');
+    let authFailureFires = 0;
+    const handle = await startServer({
+      preferredPort: 0,
+      bearerToken: TOKEN,
+      logger,
+      onPreToolUse: () => {},
+      onPostToolUse: () => {},
+      onStop: () => {},
+      onAuthFailure: () => { authFailureFires++; },
+    });
+    try {
+      const base = `http://127.0.0.1:${handle.port}`;
+      const res = await fetch(`${base}/pre-tool-use`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          Authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({
+          session_id: 'sx', tool_name: 'Edit',
+          tool_input: { file_path: '/x' }, cwd: '/work',
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(authFailureFires).toBe(0);
+    } finally {
+      await handle.dispose();
+    }
+  });
+
+  it('does not throw 500 if onAuthFailure callback itself throws', async () => {
+    const logger = new Logger('test', 'error');
+    const handle = await startServer({
+      preferredPort: 0,
+      bearerToken: TOKEN,
+      logger,
+      onPreToolUse: () => {},
+      onPostToolUse: () => {},
+      onStop: () => {},
+      onAuthFailure: () => { throw new Error('detector exploded'); },
+    });
+    try {
+      const res = await fetch(`http://127.0.0.1:${handle.port}/pre-tool-use`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+      // The auth path still returns 401 even though the callback threw.
+      expect(res.status).toBe(401);
+    } finally {
+      await handle.dispose();
+    }
+  });
+});
+
 describe('server — auth helper (unit)', () => {
   it('rejects non-bearer header', () => {
     const expected = Buffer.from(TOKEN, 'utf8');

@@ -119,3 +119,102 @@ describe('hookConfigurator — remove', () => {
     await expect(removeHooks({ workspaceRoot: tmp, scope: 'workspace' })).resolves.not.toThrow();
   });
 });
+
+/**
+ * Audit Cleanup Wave (2026-05-20): legacy unmarked entries pointing at our
+ * server URL pattern must be self-healed on the next `ensureHooksInstalled`.
+ * Without this, users upgraded from older extension versions accumulate
+ * duplicate hook entries (see 2026-05-19 debugging log — caused real auth
+ * failures in the field).
+ */
+describe('hookConfigurator — legacy unmarked cleanup', () => {
+  it('strips legacy unmarked entries matching our URL pattern on install', async () => {
+    const dir = path.join(tmp, '.claude');
+    await fs.mkdir(dir, { recursive: true });
+    // Pre-seed settings with a LEGACY unmarked entry pointing at our URL
+    // pattern (simulating an upgrade from an older extension version) AND
+    // a genuinely-user-owned entry that should be preserved.
+    const legacyUnmarked = {
+      matcher: 'Write|Edit|MultiEdit',
+      hooks: [{
+        type: 'http',
+        url: 'http://127.0.0.1:53117/pre-tool-use',
+        headers: { Authorization: 'Bearer $CLAUDE_REVIEW_TOKEN' },
+      }],
+    };
+    const genuineUser = {
+      matcher: 'Bash',
+      hooks: [{ type: 'command', command: 'echo user-hook' }],
+    };
+    await fs.writeFile(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({ hooks: { PreToolUse: [legacyUnmarked, genuineUser] } }, null, 2),
+    );
+
+    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117, scope: 'workspace' });
+
+    const root = await readSettings(tmp) as {
+      hooks: { PreToolUse: Array<Record<string, unknown>> };
+    };
+    // Expect: legacy unmarked entry STRIPPED, user-owned entry KEPT, our
+    // marked entry ADDED. Total = 2 (user + ours).
+    expect(root.hooks.PreToolUse.length).toBe(2);
+    expect(root.hooks.PreToolUse.find((e) => e.matcher === 'Bash')).toBeDefined();
+    expect(root.hooks.PreToolUse.find((e) => e[HOOK_MARKER_KEY] === HOOK_MARKER_VALUE)).toBeDefined();
+    // The duplicate "looks like ours but unmarked" is gone.
+    const httpEntries = root.hooks.PreToolUse.filter((e) => {
+      const hooks = e.hooks as Array<{ type: string }>;
+      return Array.isArray(hooks) && hooks.some((h) => h.type === 'http');
+    });
+    expect(httpEntries.length).toBe(1);
+    expect(httpEntries[0][HOOK_MARKER_KEY]).toBe(HOOK_MARKER_VALUE);
+  });
+
+  it('does NOT strip unmarked entries pointing at unrelated URLs', async () => {
+    const dir = path.join(tmp, '.claude');
+    await fs.mkdir(dir, { recursive: true });
+    const unrelatedHttp = {
+      matcher: 'Write',
+      hooks: [{
+        type: 'http',
+        url: 'http://127.0.0.1:9999/my-own-hook',
+        headers: {},
+      }],
+    };
+    await fs.writeFile(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({ hooks: { PreToolUse: [unrelatedHttp] } }, null, 2),
+    );
+
+    await ensureHooksInstalled({ workspaceRoot: tmp, port: 53117, scope: 'workspace' });
+
+    const root = await readSettings(tmp) as {
+      hooks: { PreToolUse: Array<Record<string, unknown>> };
+    };
+    expect(root.hooks.PreToolUse.length).toBe(2); // unrelated + ours
+    expect(root.hooks.PreToolUse.find((e) =>
+      Array.isArray(e.hooks) && (e.hooks as Array<{ url: string }>).some((h) => h.url.includes(':9999/'))
+    )).toBeDefined();
+  });
+
+  it('removeHooks strips legacy unmarked entries as well', async () => {
+    const dir = path.join(tmp, '.claude');
+    await fs.mkdir(dir, { recursive: true });
+    const legacyUnmarked = {
+      matcher: 'Stop',
+      hooks: [{
+        type: 'http',
+        url: 'http://127.0.0.1:53117/stop',
+        headers: { Authorization: 'Bearer $CLAUDE_REVIEW_TOKEN' },
+      }],
+    };
+    await fs.writeFile(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({ hooks: { Stop: [legacyUnmarked] } }, null, 2),
+    );
+    await removeHooks({ workspaceRoot: tmp, scope: 'workspace' });
+    const root = await readSettings(tmp) as { hooks?: unknown };
+    // Nothing left after stripping the legacy entry — hooks block is dropped.
+    expect(root.hooks).toBeUndefined();
+  });
+});

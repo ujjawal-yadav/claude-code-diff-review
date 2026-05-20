@@ -7,6 +7,88 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: Se
 
 _No unreleased changes yet._
 
+## [0.2.0] — 2026-05-20
+
+A substantial feature release. The headline additions are the **History panel** (every Claude session reviewable any time, with Resume / Rollback / Delete actions), **transcript-aware chat** (hunk chat cites your original prompt and Claude's surrounding tool calls), and **sub-agent attribution** (files edited inside a Task call are labelled with the sub-agent description). Major reliability work too: bearer token now persists across reloads, hooks self-heal stale legacy entries on activation, and a burst-detector toast surfaces actionable recovery on auth failures.
+
+### Added
+
+- **History panel** (M9.2 + β.0). Every past session reviewable any time: turn timelines, per-file decision counts, sub-agent labels. Open via `Claude Review: Open History Panel`.
+- **Resume Review** (β.0 / 10.1.8). Reopen a session you closed mid-review — the panel reconstructs the prior state with all accept/reject decisions preserved, replaying the event log.
+- **Rollback this turn** (β.0). Restores every file in a session to its pre-edit content, atomically per file. Modal confirm before destructive action.
+- **Delete from history** (β.0). Permanently removes the event log + content-addressed blobs (cross-session blob sharing preserved). Modal confirm.
+- **Pending status bar** (β.0 / 10.1.6). A second status-bar item — `↶ N pending` — surfaces the total unfinished-hunk count across recoverable sessions in the last 7 days. Click to open the panel.
+- **`Open Review Panel` resume prompt** (β.0 / 10.1.7). When invoked with no live session but recoverable sessions on disk, shows a modal `Resume / Open History / Dismiss`.
+- **Transcript-aware chat** (M9.5). `💬 Ask Claude` queries are augmented with the user's original prompt and Claude's surrounding tool calls, sourced from `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`. Toggle with `claudeReview.chat.transcriptContext` (default on). Transcript content stays host-side; never crosses to the webview (covered by an integration test).
+- **Sub-agent attribution** (M9.6). Files edited inside a `Task` tool invocation display a `via Task: <description>` chip in the review panel's file list, a tooltip on the hunk header, and a `· via Task: <description>` label in the history panel's turn cards.
+- **Live-update History panel** (2026-05-19). Sessions started while the panel is open appear within ~300 ms; pending-count badges update in real-time. Backed by a `HistoryService.addChangeListener` channel with multi-listener support; the `PendingStatusBar` subscribes too.
+- **Burst-detector toast** (2026-05-19). When ≥3 hook auth failures land in a 10s window, a warning toast surfaces `[Open New Terminal]`, `[Show Logs]`, `[Rotate Token]` action buttons for one-click recovery. Cooldown 60s after a fire to prevent toast spam.
+- **`auth.failed` log entries** (2026-05-19). Server's 401 path now emits structured warn-level logs with length-only token signals (`hadHeader`, `headerLooksLikeBearer`, `suppliedLen`, `expectedLen`) plus a 13-char header prefix for diagnosing scheme mismatches without leaking enough bytes to brute-force.
+- **`Rotate Bearer Token` command** improved (2026-05-19). Updates the env-var collection immediately and prompts `[Reload Window]` so the running server re-derives the expected token in one click.
+- **Set-based reversibility** (M9.1). Reject pipeline replays the snapshot through an `acceptedSet` rather than re-running individual reverts, eliminating the fuzz-factor cliff on multi-hunk rejects. Session-level `Undo last action` operates over the same set.
+- **Memory Design substrate** (M9.2). Content-addressed JSONL event log + SHA-256 blob store at `~/.claude/review-history/<workspaceHash>/`. Default 30-day retention via a sweeper that runs every 10 minutes. Cross-session blob sharing for storage efficiency.
+- **User-scope hook install by default** (M9.3). `~/.claude/settings.json` is now the default install target so every workspace inherits the hook config. `Switch Install Scope` command toggles to workspace scope on demand.
+- **Agent-adapter groundwork** (M9.4a). `AgentAdapter` interface extracted; Claude Code is the only adapter today, but the structure is ready for multi-agent. (OpenCode adapter deferred to a future release.)
+- **Sub-agent transcript reader** (M9.5 + M9.6). Heap-bounded JSONL streaming via `readline`, ring-buffer windowing. Per-session cache with Promise coalescing so concurrent reads share one disk pass.
+- **`claudeReview.openHistory`** + **`claudeReview.rotateBearerToken`** + **`claudeReview.showLog`** commands.
+
+### Changed
+
+- **Bearer token now persists across activations** via OS keychain (`vscode.SecretStorage`), replacing the per-activation rotation that broke every existing terminal on every reload. Explicit rotation remains available via `Claude Review: Rotate Bearer Token`.
+- **`environmentVariableCollection.persistent = true`** so restored terminals across window reloads inherit the env var. With the stable token above, terminals from prior VS Code sessions stay aligned.
+- **`reconstructSessionReview` is materially faster** — per-event blob reads batched via `Promise.all` (turn-started, turn-stopped, undo). Saves ~200-400 ms on Resume Review for typical 50-file sessions.
+- **History panel session-list re-renders live** when new events arrive. Trailing-edge 300 ms debounce absorbs Claude's burst-write pattern (5–10 events in <50 ms during a turn).
+- **`HistoryIndexFile.update()` is now serialized** via a per-instance promise-chain mutex; concurrent record* callers no longer clobber each other's mutations.
+- **`HistoryWriter.append` rejects events exceeding 5 MB** up-front rather than producing oversized segments that violate the cap.
+- **`.gitignore` injection now uses atomic write** (tmp + rename); concurrent edits from other tools don't race.
+- **Path-traversal guard** in `readWorkspaceFile` + `joinCwd` — escapes are logged and rejected.
+- **Single source of truth for `AgentId`** in `types.ts`; `historyEvents.ts` and `adapters/agentAdapter.ts` re-export.
+- **System-prompt for hunk chat** updated to v2 (M9.5). When transcript context is present, the model is instructed to cite it specifically for "why did Claude do this?" questions.
+- **Hook config installs are now self-healing**: legacy unmarked entries that point at our `127.0.0.1:<port>/(pre|post|stop)-tool-use` URL pattern are auto-stripped on each activation. Logged as `hooks.legacy.stripped` for auditability.
+
+### Fixed
+
+- **Bug B**: `openReview` no longer wipes prior hunk decisions when Claude continues editing in a resumed session. The `hunksAlignedShallow` preservation pattern from `reDiff` is now applied on every panel rebuild.
+- **Bug C**: `adoptReconstructed` sets `currentTurnId: null` (was leaking the prior turn id), so the next PreToolUse mints a fresh turn id and produces clean per-turn event boundaries in the log.
+- **Bug D**: `PanelGateway` methods accept `sessionId` explicitly; multi-panel routing no longer relies on the last-write-wins `globalByPath` heuristic that mis-routed events when two sessions touched the same file.
+- **Bug E**: concurrent `extractSubagentId` calls coalesce via a Promise cache; the transcript is parsed once per session, not once per call.
+- **Audit-integrity bugs in `record*` helpers**: `recordHunkDecisionEvent`, `recordSnapshotRevertEvent`, `recordTurnStoppedEvent`, `recordUndoEvent` now route through `currentTurnId ?? lastTurnId` so post-Stop emissions don't silently drop. `recordTurnStoppedEvent` is now awaited (not fire-and-forget).
+- **`reDiff` runs through the per-file mutex** — the race between scheduled re-diff and in-flight hunk actions is closed.
+- **Sub-agent cache lifetime** — cleared on `dismissSession` to bound memory.
+- **Webview-side `init` re-emission** preserves the currently-loaded `SessionDetail` if its session still exists in the refreshed list.
+- **Multi-panel routing in `postFileUpdated` / `postHunkApplied` / `postSetConflict`** — events route to the correct panel by sessionId, not by URL pattern match.
+
+### Removed
+
+- **`claudeReview.rotateTokenOnDeactivate` config key** — was unused after the stable-token migration; removing it eliminates a user-facing toggle that did nothing.
+- **`claudeReview.history.crossTurnUndo` config key** — declared as a developer-mode flag but the runtime gate was never wired. Cross-turn undo remains future work; the flag will be re-added when implemented.
+- **Unconditional activation toast** advising terminal restart — replaced by the burst-detector toast that fires only on actual auth failures (more accurate, never spurious).
+
+### Security
+
+- Bearer token persists in OS keychain (`vscode.SecretStorage`) only; never written to env files, never logged, never crossed to the webview.
+- Transcript content is read host-side via `readTranscriptWindow` + `readTaskEntries`; never crosses to the webview. An integration test asserts the postMessage stream contains no transcript bytes.
+- `auth.failed` log redacts to length signals + 13-char prefix only. Sufficient to distinguish scheme mismatches without leaking enough bytes to brute-force a 64-char hex token against a rate-limited localhost server.
+- Hook URL pattern (`http://127.0.0.1:<port>/(pre|post|stop)-tool-use`) is the identity for the auto-cleanup of legacy unmarked entries. Documented in code; logged on every strip.
+- Path-traversal guard in `readWorkspaceFile` is defence-in-depth — `relPath` is extension-controlled today.
+
+### Performance
+
+- Resume Review on a 50-file / ~5-decision-per-file session: ~200–400 ms faster after the `Promise.all` blob-read batching.
+- `Stop → init` dispatch budget (50 files / 2000 changed lines): observed P99 ~643 ms vs the 4500 ms target. Well within budget; no regression vs 0.1.0.
+- Live-update debounce: 300 ms trailing-edge. Coalesces Claude's burst writes into one re-post per turn rather than one per event.
+
+### Tests
+
+- **343 / 343 passing** (172 added since 0.1.0). New suites: `history.reconstruction.test.ts`, `history.actions.test.ts`, `history.liveUpdate.test.ts`, `orchestrator.adoptReconstructed.test.ts`, `orchestrator.undoAudit.test.ts`, `resume-and-continue.test.ts`, `subagent.test.ts`, `chat.transcript.test.ts`, `authFailureBurstDetector.test.ts`, `rotateBearerToken.test.ts`, plus extensions to `server.test.ts`, `hookConfigurator.test.ts`, `chatService.test.ts`, `memoryLeak.test.ts`, `perf.bench.test.ts`.
+
+### Upgrade notes
+
+- **First activation after upgrade** will reuse your existing bearer token (read from keychain). Hooks written by 0.1.0 are stripped + replaced by marked entries — you'll see `hooks.legacy.stripped` in the Output channel if any legacy entries existed.
+- **Existing terminals** opened in a 0.1.0 session don't have the new env var. If a hook returns 401, click `[Open New Terminal]` in the burst-detector toast (or just open a fresh terminal manually). New terminals inherit the persistent token.
+- **History opt-out:** event logging is on by default. Set `claudeReview.history.enabled: false` to disable; existing logs are not deleted.
+- **Transcript context:** chat queries automatically include transcript context. Disable with `claudeReview.chat.transcriptContext: false` if you want hunk-only queries.
+
 ## [0.1.0] — 2026-05-11
 
 Initial public release. Highlights:

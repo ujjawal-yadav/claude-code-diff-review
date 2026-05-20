@@ -33,7 +33,10 @@
  * boundary between the host runtime and the per-agent parsers.
  */
 
-export type AgentId = 'claude-code' | 'opencode';
+// Single source of truth lives in `src/types.ts`. Re-exported here so the
+// adapter contract module stays import-self-contained for consumers.
+import type { AgentId } from '../types.js';
+export type { AgentId };
 
 // --------------------------------------------------------------------------
 // Hook-config generation

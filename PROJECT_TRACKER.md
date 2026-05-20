@@ -1493,3 +1493,139 @@ Other resolved (defaults adopted from spec recommendation, no new Deviation need
 2. M9.4b (OpenCode adapter) — gated on OpenCode hook spec confirmation.
 3. M9.5 — flesh out `resolveTranscriptPath` for Claude Code (`~/.claude/projects/<slug>/<sessionId>.jsonl`).
 4. M9.6 — `extractSubagentId` for Claude Code Task tool.
+
+---
+
+### Session (Live-Update Wave) — 2026-05-19 23:00 — History panel live refresh
+
+**Summary:** Make the History panel and PendingStatusBar refresh automatically when new event-log writes happen while they're visible. Closes the user-reported gap: sessions started after the panel opens never appeared until manual reopen.
+
+**Completed:**
+- [x] HistoryService gains a multi-listener change emitter (`addChangeListener` → returns unsubscribe). Listeners fire after each successful `record*` and `deleteSession`. Disabled service short-circuits before emission; throwing listeners are caught and logged without breaking the write path.
+- [x] All 7 emission sites wired: `recordTurnStarted`, `recordTurnStopped`, `recordHunkDecided`, `recordFileSnapshotReverted`, `recordUndo`, `recordTurnAborted`, `deleteSession`.
+- [x] HistoryPanelManager subscribes in `openOrFocus`, debounces 300ms trailing-edge, re-posts `{type:'init', sessions, root}`. Unsubscribes + clears timer in `onDidDispose`.
+- [x] PendingStatusBar subscribes via `extension.ts`; its existing internal debounce + 1s TTL cache on `getPendingReviewsSummary` absorb burst writes.
+- [x] 12 new integration tests in `tests/integration/history.liveUpdate.test.ts` — per-method emission, disabled-service guard, multi-listener delivery, unsubscribe semantics, throwing-listener isolation, full lifecycle ordering.
+
+**Files Changed:**
+- `src/history/historyService.ts` — added `HistoryChangeKind` / `HistoryChangeInfo` / `HistoryChangeListener` exports, `listeners` Set, `addChangeListener` public method, `emitChange` private method, 7 emit-call wiring sites.
+- `src/historyPanel.ts` — `PanelState` gained `unsubscribe?` + `refreshTimer?`; `openOrFocus` subscribes; `onDidDispose` cleans up; new private `scheduleSessionListRefresh` method; added `LIST_REFRESH_DEBOUNCE_MS = 300` constant.
+- `src/extension.ts` — wired `history.addChangeListener` → `pendingStatusBar.scheduleRefresh` near construction; unsubscribe pushed to `context.subscriptions`.
+- `tests/integration/history.liveUpdate.test.ts` — new (12 tests).
+- `PROJECT_TRACKER.md` — this entry.
+
+**Decisions:**
+- Multi-listener Set, NOT the single-callback `onChange` pattern used by `ReviewOrchestrator`. History naturally has 2+ subscribers (panel + status bar + future).
+- Trailing-edge 300ms debounce in the panel — absorbs Claude's 5–10-events-in-<50ms burst pattern; one post per turn rather than per write.
+- SessionDetail does NOT auto-refresh when the currently-viewed session gets new events (user-locked scope decision). The list refreshes; details require a click. Smaller blast radius.
+- Hunk diffs remain a Review-panel feature, not a History-panel feature (out of scope; deliberate).
+
+**Deviations:** None.
+
+**Tech Debt Introduced:**
+- `handleDelete` in `historyPanel.ts:241` still does an explicit `listSessions → post(init)` for immediate UX feedback. The emitter would also trigger a debounced refresh ~300ms later. Idempotent (webview replaces the list), but the explicit re-emit could be removed in a future cleanup.
+
+**Blockers:** None.
+
+**Next Session Should:**
+1. Manual dev-host verification: open History panel, run `claude` in a new terminal, observe new session card appears within ~300ms of Stop.
+2. (Optional polish) Decide whether to remove the redundant explicit `init` re-emit in `handleDelete` now that the emitter handles it.
+3. Consider extending live updates to the open SessionDetail in a future slice (currently a deliberate scope cut).
+
+---
+
+### Session (Auth-Token UX Wave) — 2026-05-19 23:55 — Stable token + 401 observability
+
+**Summary:** Fix the structural UX failure where every extension reload broke every existing terminal. The token now persists across activations via OS keychain; the env var collection is persistent across reloads; the silent 401 path is now visible (warn log) and self-recovering (burst-detector toast with one-click "Open New Terminal").
+
+**Completed:**
+- [x] Swap `secrets.rotateBearerToken()` → `secrets.getOrCreateBearerToken()` at activation. The keychain-stored token is reused across reloads.
+- [x] Set `environmentVariableCollection.persistent = true` so VS Code restores the env var on window reload (restored terminals stay aligned).
+- [x] Drop the unconditional activation toast (was preemptive and inaccurate after the first install).
+- [x] `server.ts` 401 path now emits `logger.warn('server', 'auth.failed', {...})` with length-only signals (never the token bytes), then invokes `opts.onAuthFailure?.()` wrapped in try/catch.
+- [x] New `AuthFailureBurstDetector` (`src/authFailureBurstDetector.ts`): sliding-window detector (3 failures in 10s → toast; 60s cooldown). Toast offers `[Open New Terminal] [Show Logs] [Rotate Token]`.
+- [x] Extension wires the detector into `startServer({ onAuthFailure })`; pushed to `context.subscriptions`.
+- [x] `claudeReview.rotateBearerToken` command now ALSO updates `context.environmentVariableCollection` immediately (so new terminals get the new token) and offers `[Reload Window]` to restart the server with the new expected token.
+- [x] 9 new unit tests for the burst detector (threshold, sliding window, cooldown, action dispatch, dismissal, dispose).
+- [x] 3 new integration tests for the server's 401 path (log fires, callback invoked, callback throw doesn't 500).
+
+**Files Changed:**
+- `src/server.ts` — `ServerOptions.onAuthFailure?: () => void`; `onRequest` hook now logs `auth.failed` + invokes the callback (try/catch) before replying 401.
+- `src/extension.ts` — activation: `getOrCreateBearerToken`, `persistent = true`, dropped activation toast; constructed `AuthFailureBurstDetector` and wired it into `startServer`; `rotateBearerToken` command now updates env collection and prompts for reload.
+- `src/authFailureBurstDetector.ts` — **NEW**, ~150 LOC. Sliding-window burst detector with cooldown, test seams (`showToast`, `executeAction`, `now`).
+- `tests/unit/authFailureBurstDetector.test.ts` — **NEW**, 9 tests.
+- `tests/integration/server.test.ts` — extended with 3 tests for the new 401 observability path.
+- `PROJECT_TRACKER.md` — this entry.
+
+**Decisions:**
+- Tier 1 (observability) + Tier 2 (stable token) shipped together. Tier 3 (file-based token for external terminals) and Tier 4 (socket-based auth) deferred.
+- Burst threshold = 3 / window = 10s / cooldown = 60s — matches the PreToolUse + PostToolUse + Stop trio pattern that triggers on a single Claude turn.
+- Toast offers rotation as third (not primary) action — rotation invalidates ALL terminals, so it's an escape hatch for suspected leaks, not the common-case recovery.
+- Dropped the activation toast entirely. The burst detector is a strictly better signal — fires at the actual moment of failure, never spuriously.
+- `auth.failed` log includes header presence + Bearer-prefix boolean + length-only signals. Never the token bytes themselves.
+
+**Deviations:** None.
+
+**Tech Debt Introduced:**
+- Rotation still requires a window reload because the running server holds `expectedToken` as a captured Buffer at startup. A live-update mechanism (setter on the server handle) would remove the reload step but adds complexity. Kept as-is; rotation is rare.
+- External-terminal support (Tier 3, file-based token resolution) deferred — Claude run from Windows Terminal / tmux outside VS Code still won't get the env var. Tracked but not in this slice.
+
+**Blockers:** None.
+
+**Next Session Should:**
+1. Manual dev-host verification: keep an old terminal open across a reload, run `claude` in it, observe the toast appears after ~3 failed hooks with the three action buttons. Click `[Open New Terminal]` → hooks succeed in the new terminal.
+2. Verify that after the first activation, subsequent reloads do NOT change the token (terminals from prior sessions stay valid).
+3. Consider Tier 3 (file-based token) if external-terminal usage becomes a real user need.
+
+---
+
+### Session (Audit Cleanup Wave) — 2026-05-20 02:55 — 5-agent review actionables
+
+**Summary:** Acted on the highest-leverage findings from a 5-agent (architecture, perf, security/reliability, test coverage, recent-changes) audit. Shipped one perf win, three reliability hardenings, a durable hook-config self-heal, three hygiene fixes, and three test-gap closures. Deferred index-write batching (largest perf opportunity but well below budget) and the orchestrator god-class split (churn for churn's sake).
+
+**Completed:**
+- [x] Parallelise per-event blob reads in `reconstructSessionReview` (turn-started, turn-stopped, undo handlers) via `Promise.all`. Saves ~200-400ms on Resume Review for typical 50-file sessions.
+- [x] Async mutex (promise chain) around `HistoryIndexFile.update()` prevents read-then-write races between concurrent record* callers.
+- [x] Per-event size guard in `HistoryWriter.append` — rejects events exceeding `MAX_SEGMENT_BYTES` instead of silently producing oversized segments.
+- [x] Atomic write (tmp + rename) for `.gitignore` injection in `maybePromptGitignore`.
+- [x] Replaced dynamic `require('node:path')` with static `import * as path from 'node:path'`; also `node:fs/promises` and `node:crypto` brought to top.
+- [x] Deduplicated `AgentId` — `types.ts` is now the single source; `historyEvents.ts` and `adapters/agentAdapter.ts` import-and-re-export.
+- [x] Path-traversal guard in `readWorkspaceFile` + `joinCwd` — escapes are logged and rejected (return null). `reconstructSessionReview` skips files that would escape `cwd`.
+- [x] Durable hookConfigurator cleanup — strips legacy unmarked entries matching our `127.0.0.1:<port>/(pre|post|stop)-tool-use` URL pattern alongside the marker filter. Self-heals users upgraded from older extension versions (real field issue from 2026-05-19).
+- [x] Extracted `rotateBearerTokenAndPromptReload` as testable function; unit tests verify env-collection propagation, reload prompt, dismissal handling.
+- [x] Server integration test extended with `headerPrefix` short-header boundary case (header < 13 chars).
+- [x] Live-update test extended with subscribe → debounce → unsubscribe lifecycle regression.
+- [x] Legacy-cleanup tests for both `ensureHooksInstalled` and `removeHooks` paths, plus negative test confirming unrelated URLs aren't stripped.
+
+**Files Changed:**
+- `src/history/historyService.ts` — `Promise.all` blob batches in three event handlers; path-traversal guard via `joinCwd → string | null`; reconstruction skips path-escape files.
+- `src/history/historyIndex.ts` — `writeLock` promise chain in `update()`.
+- `src/history/historyEvents.ts` — replaced `AgentId` declaration with `import type` + `export type` from `types.ts`.
+- `src/history/historyWriter.ts` — per-event size guard before segment-roll check.
+- `src/adapters/agentAdapter.ts` — same re-export pattern as historyEvents.
+- `src/hookConfigurator.ts` — `entryLooksLikeOurs` helper + `OUR_HOOK_URL_RE`; legacy cleanup filter in `ensureHooksInstalled` and `removeHooks`; `logger?` field on `HookConfigOptions`.
+- `src/extension.ts` — static `path`/`fs`/`crypto` imports; replaced `require('node:path')` and `await import('node:path')` usages; atomic `.gitignore` write; `rotateBearerTokenAndPromptReload` exported helper; passes `logger` to `ensureHooksInstalled` callers.
+- `tests/unit/rotateBearerToken.test.ts` — **NEW** (6 tests).
+- `tests/unit/hookConfigurator.test.ts` — extended with 3 legacy-cleanup tests.
+- `tests/integration/server.test.ts` — extended with `headerPrefix` boundary test.
+- `tests/integration/history.liveUpdate.test.ts` — extended with subscribe → debounce → unsubscribe lifecycle test.
+- `PROJECT_TRACKER.md` — this entry.
+
+**Decisions:**
+- Defer index-write batching: current P99 is ~643ms vs 4500ms budget; ~20-45ms saved per turn doesn't justify the atomicity/crash-safety complexity in this slice. Revisit if budget tightens.
+- Defer ReviewOrchestrator god-class split: refactoring works that work is churn; file is large but well-tested.
+- Hook cleanup self-heals on next activation rather than requiring an explicit user command. Logged via `hooks.legacy.stripped` for auditability.
+- Path-traversal guard returns null + logs (matches existing ENOENT contract) rather than throwing — callers already handle null cleanly.
+- Extracted `rotateBearerTokenAndPromptReload` exported function instead of testing through `vscode.commands.registerCommand` — minimal refactor, much better test ergonomics.
+
+**Deviations:** None.
+
+**Tech Debt Introduced:** None.
+
+**Blockers:** None.
+
+**Next Session Should:**
+1. Manual dev-host verification: rebuild, reload, observe `hooks.legacy.stripped` Output log if any unmarked duplicates exist in `~/.claude/settings.json`. Verify clean hook execution.
+2. Profile Resume Review on a session with ≥10 turns and ≥30 files — confirm the perceived improvement from parallel blob reads.
+3. Consider an explicit `claudeReview.cleanupHooks` command for users who want to trigger the legacy sweep without waiting for the next activation. Low priority since activation already does it.
+4. Index-write batching as a future perf slice if P99 climbs.

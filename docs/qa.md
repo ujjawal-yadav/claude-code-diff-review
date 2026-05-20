@@ -111,6 +111,52 @@ Run a real Claude session: edit a file with at least 2 distinct hunks. Review th
 - [ ] **Global off wins.** Set telemetry "on" but VS Code global = "off". **Expect:** no events.
 - [ ] **PII scrubbed.** Inspect any logged event payload. **Expect:** no `apiKey`, no `filePath`, no message content.
 
+## O. History panel (v0.2)
+
+- [ ] **Opens with sessions.** Run **Claude Review: Open History Panel** with at least 2 past sessions in the event log. **Expect:** left list shows both, sorted newest-first.
+- [ ] **Selection populates detail.** Click a session. **Expect:** right pane shows session id, agent, status, started/last-event timestamps, turn timeline with file counts.
+- [ ] **Resume Review.** Click **Resume Review** on a session with pending hunks. **Expect:** review panel opens with the prior accept/reject state preserved (decided hunks render with their badge, not as pending).
+- [ ] **Resume — already-live focus.** Open the review panel for a live session, then open the history panel and click Resume on the same session. **Expect:** panel just focuses (no reconstruction churn).
+- [ ] **Rollback this turn.** On a session with at least one file, click **Rollback this turn**. **Expect:** modal confirm appears; on accept, every file in the session is restored to its pre-edit content on disk; `file-snapshot-reverted` events are appended.
+- [ ] **Delete from history.** Click **Delete from history**. **Expect:** modal confirm; on accept, the session disappears from the list and its segments + unreferenced blobs are removed from `~/.claude/review-history/<workspaceHash>/`.
+- [ ] **Pending-count badge.** Sessions with pending hunks show a `N pending` badge on the card. Decided sessions show none.
+
+## P. Live updates (v0.2)
+
+- [ ] **New session appears.** With the history panel open, run a new `claude` session that finishes a turn. **Expect:** a new card appears in the left list within ~300 ms of Stop, without reopening the panel.
+- [ ] **Pending status bar updates live.** With at least one in-flight hunk decision, observe the `↶ N pending` status bar item update count as you Accept / Reject hunks.
+- [ ] **Selection preserved across refresh.** Click a session in the list; trigger a record (e.g., make a hunk decision via the review panel). **Expect:** the detail pane stays on the selected session; doesn't snap back to the list.
+
+## Q. Sub-agent attribution (v0.2)
+
+- [ ] **Chip renders.** Run a Claude session where the assistant uses the `Task` tool to delegate editing one or more files. **Expect:** the review panel's file list shows `via Task: <description>` chip (truncated to 32 chars) on every file edited inside the Task call.
+- [ ] **Tooltip + hunk header.** Hover the chip. **Expect:** full sub-agent description tooltip. The hunk header carries the same tooltip via `title=`.
+- [ ] **History panel label.** Open the history panel for the same session. **Expect:** the affected files show a `· via Task: <description>` inline label next to the file path.
+- [ ] **No false positives.** Run a non-Task session. **Expect:** no chip rendered (files show no `via Task` label).
+- [ ] **Survives reconstruction.** Resume the same session. **Expect:** the chip is still present (sub-agent attribution is event-log-persisted).
+
+## R. Transcript-aware chat (v0.2)
+
+- [ ] **Citation present.** Ask a non-obvious question on a hunk via `💬 Ask Claude`. **Expect:** the streaming response references the user's original prompt or Claude's prior tool calls (verifiable by reading the response).
+- [ ] **Toggle off.** Set `claudeReview.chat.transcriptContext: false`. Re-ask the same question. **Expect:** response is hunk-only; no citations of the user's prompt.
+- [ ] **Missing transcript graceful.** Delete `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` for the active session. Ask a hunk question. **Expect:** chat completes successfully; no transcript citations; no error.
+- [ ] **Security: no transcript bytes cross to webview.** Open DevTools on the review panel webview (Developer: Open Webview Developer Tools). Filter network for `postMessage`. Make a chat query with a known unique string in the transcript. **Expect:** the string does NOT appear in any host→webview message.
+
+## S. Auth recovery (v0.2)
+
+- [ ] **Burst-detector toast fires.** Open a terminal BEFORE the extension activates (i.e., open one then reload the dev host). Run `claude` and make 3 edits in a row. **Expect:** within ~10 s of the 3rd 401, a warning toast appears: "hooks are returning 401" with `[Open New Terminal]`, `[Show Logs]`, `[Rotate Token]` actions.
+- [ ] **Open New Terminal works.** Click `[Open New Terminal]`. **Expect:** a fresh terminal spawns; running `claude` in it succeeds against the hooks (no 401).
+- [ ] **Show Logs works.** Click `[Show Logs]`. **Expect:** the Output channel for Claude Code Review opens.
+- [ ] **Rotate Token works.** Click `[Rotate Token]`. **Expect:** secondary toast appears prompting `[Reload Window]`; after reload, the new token is active.
+- [ ] **Cooldown holds.** Trigger another burst within 60 s of the first toast. **Expect:** NO additional toast (cooldown active). After 60 s, a new burst re-fires the toast.
+- [ ] **`auth.failed` log entries.** Open the Output channel after a burst. **Expect:** warn-level entries with `route`, `hadHeader`, `headerLooksLikeBearer`, `suppliedLen`, `expectedLen`, `headerPrefix` (first 13 chars). Token bytes are NOT logged.
+
+## T. Hook self-heal (v0.2)
+
+- [ ] **Legacy entry stripped on activation.** Manually add an unmarked HTTP hook entry to `~/.claude/settings.json` whose URL matches `http://127.0.0.1:<port>/(pre|post|stop)-tool-use`. Reload. **Expect:** Output channel shows `hooks.legacy.stripped { count: 1 }` (or higher); the entry is gone from settings.json; our marked entry remains.
+- [ ] **Unrelated URLs preserved.** Add an unmarked hook entry pointing at a DIFFERENT URL (e.g., `http://127.0.0.1:9999/my-hook`). Reload. **Expect:** the entry is still present.
+- [ ] **Persistent token survives reload.** Restart VS Code without closing the terminal. Run `claude` in the same terminal. **Expect:** hooks succeed without 401 (terminal's env var matches the still-valid keychain token).
+
 ---
 
 ## Sign-off

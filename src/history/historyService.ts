@@ -49,6 +49,32 @@ import type { InstallScope } from '../hookConfigurator.js';
 
 const LAST_MESSAGE_CAP_BYTES = 4096;
 
+/**
+ * Live-update channel (2026-05-19). Fires after every successful event-log
+ * write. Subscribers (HistoryPanelManager, PendingStatusBar) react to keep
+ * their UI in sync with on-disk state. Multiple subscribers supported — a
+ * Set is used rather than `ReviewOrchestrator`'s single-callback pattern.
+ *
+ * Failures in a listener are caught and logged; they never propagate into
+ * the write path. Listeners are expected to be cheap (e.g. schedule a
+ * debounced refresh) — never do I/O synchronously inside one.
+ */
+export type HistoryChangeKind =
+  | 'turn-started'
+  | 'turn-stopped'
+  | 'hunk-decided'
+  | 'snapshot-reverted'
+  | 'undo'
+  | 'turn-aborted'
+  | 'session-deleted';
+
+export interface HistoryChangeInfo {
+  sessionId: string;
+  kind: HistoryChangeKind;
+}
+
+export type HistoryChangeListener = (info: HistoryChangeInfo) => void;
+
 export interface HistoryServiceOptions {
   scope: InstallScope;
   /** Workspace root (absolute). Required even for user-scope to derive the hash. */
@@ -157,6 +183,12 @@ export class HistoryService {
   private pendingSummaryCache: { value: PendingReviewsSummary; expiresAt: number } | null = null;
   private static readonly PENDING_SUMMARY_TTL_MS = 1_000;
 
+  /**
+   * Live-update listeners. See `HistoryChangeListener` JSDoc on the type
+   * definition for the contract and failure semantics.
+   */
+  private readonly listeners = new Set<HistoryChangeListener>();
+
   constructor(private readonly opts: HistoryServiceOptions) {
     this.root = resolveHistoryRoot(opts.scope, opts.workspaceRoot);
     this.blobs = new BlobStore({ root: this.root });
@@ -171,6 +203,35 @@ export class HistoryService {
 
   isEnabled(): boolean {
     return this.opts.enabled;
+  }
+
+  /**
+   * Subscribe to live-update notifications. Returns an unsubscribe function.
+   *
+   * Listeners fire on every successful `record*` write and on `deleteSession`.
+   * They do NOT fire when the service is disabled (the early-exit short-circuits
+   * before emission). A throwing listener cannot break the write path —
+   * `emitChange` isolates each listener in a try/catch.
+   */
+  addChangeListener(listener: HistoryChangeListener): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private emitChange(info: HistoryChangeInfo): void {
+    for (const l of this.listeners) {
+      try {
+        l(info);
+      } catch (err) {
+        this.opts.logger.warn('history', 'listener.threw', {
+          err: String(err),
+          kind: info.kind,
+          sid: info.sessionId,
+        });
+      }
+    }
   }
 
   // -- write paths ---------------------------------------------------------
@@ -196,6 +257,7 @@ export class HistoryService {
       };
       await writer.append(ev);
       await this.upsertIndexEntry(input.sessionId, input.agentId, /* incrementTurn */ true, null);
+      this.emitChange({ sessionId: input.sessionId, kind: 'turn-started' });
     } catch (err) {
       this.opts.logger.warn('history', 'turn.started.failed', { err: String(err), sid: input.sessionId });
     }
@@ -232,6 +294,7 @@ export class HistoryService {
       };
       await writer.append(ev);
       await this.markSessionClosed(input.sessionId, input.agentId, lastMsg);
+      this.emitChange({ sessionId: input.sessionId, kind: 'turn-stopped' });
     } catch (err) {
       this.opts.logger.warn('history', 'turn.stopped.failed', { err: String(err), sid: input.sessionId });
     }
@@ -257,6 +320,7 @@ export class HistoryService {
         drift: input.drift,
       });
       await this.invalidatePendingHunkCount(input.sessionId);
+      this.emitChange({ sessionId: input.sessionId, kind: 'hunk-decided' });
     } catch (err) {
       this.opts.logger.warn('history', 'decision.failed', { err: String(err), sid: input.sessionId });
     }
@@ -277,6 +341,7 @@ export class HistoryService {
         postBlob,
       });
       await this.invalidatePendingHunkCount(input.sessionId);
+      this.emitChange({ sessionId: input.sessionId, kind: 'snapshot-reverted' });
     } catch (err) {
       this.opts.logger.warn('history', 'revert.failed', { err: String(err), sid: input.sessionId });
     }
@@ -315,6 +380,7 @@ export class HistoryService {
         cascaded: input.cascaded ?? [],
       });
       await this.invalidatePendingHunkCount(input.sessionId);
+      this.emitChange({ sessionId: input.sessionId, kind: 'undo' });
     } catch (err) {
       this.opts.logger.warn('history', 'undo.failed', { err: String(err), sid: input.sessionId });
     }
@@ -344,6 +410,7 @@ export class HistoryService {
         entry.pendingHunkCount = null;
         await this.index.upsertSession(entry);
       }
+      this.emitChange({ sessionId, kind: 'turn-aborted' });
     } catch (err) {
       this.opts.logger.warn('history', 'abort.failed', { err: String(err) });
     }
@@ -437,8 +504,15 @@ export class HistoryService {
       switch (ev.kind) {
         case 'turn-started': {
           turnId = ev.turnId;
-          for (const f of ev.files) {
-            const before = f.beforeBlob ? await this.safeReadBlob(f.beforeBlob) : '';
+          // Batch per-file beforeBlob reads. Within a single event the reads
+          // are independent (content-addressed immutable blobs); cross-event
+          // ordering is preserved by the outer for-await-of loop.
+          const beforeContents = await Promise.all(
+            ev.files.map((f) => (f.beforeBlob ? this.safeReadBlob(f.beforeBlob) : Promise.resolve(''))),
+          );
+          for (let i = 0; i < ev.files.length; i++) {
+            const f = ev.files[i]!;
+            const before = beforeContents[i]!;
             const state = files.get(f.path) ?? {
               relPath: f.path,
               originalSnapshot: before,
@@ -459,8 +533,13 @@ export class HistoryService {
         }
         case 'turn-stopped': {
           turnId = ev.turnId;
-          for (const f of ev.files) {
-            const after = f.afterBlob ? await this.safeReadBlob(f.afterBlob) : '';
+          // Batch per-file afterBlob reads (same rationale as turn-started).
+          const afterContents = await Promise.all(
+            ev.files.map((f) => (f.afterBlob ? this.safeReadBlob(f.afterBlob) : Promise.resolve(''))),
+          );
+          for (let i = 0; i < ev.files.length; i++) {
+            const f = ev.files[i]!;
+            const after = afterContents[i]!;
             const existing = files.get(f.path);
             const state: PerFileState = existing ?? {
               relPath: f.path,
@@ -524,10 +603,17 @@ export class HistoryService {
         }
         case 'undo': {
           // Re-anchor each affected file's afterContent from postBlobs.
-          for (const [relPath, sha] of Object.entries(ev.postBlobs)) {
+          // Reads are independent — batch them.
+          const undoEntries = Object.entries(ev.postBlobs);
+          const undoContents = await Promise.all(
+            undoEntries.map(([, sha]) => this.safeReadBlob(sha)),
+          );
+          for (let i = 0; i < undoEntries.length; i++) {
+            const [relPath] = undoEntries[i]!;
+            const content = undoContents[i]!;
             const state = files.get(relPath);
             if (!state) continue;
-            state.afterContent = await this.safeReadBlob(sha);
+            state.afterContent = content;
             // For scope:'hunk' with a specific hunkIdx, flip that hunk back
             // to pending so the user sees the undone decision as undecided.
             if (ev.scope === 'hunk' && ev.target.path === relPath && ev.target.hunkIdx !== undefined) {
@@ -587,6 +673,11 @@ export class HistoryService {
     const hunkSets: ReconstructedSessionReview['hunkSets'] = [];
     for (const [relPath, state] of files) {
       const filePath = this.joinCwd(cwd, relPath);
+      if (filePath === null) {
+        // joinCwd already logged the escape; skip this file so reconstruction
+        // doesn't surface a path that points outside the workspace.
+        continue;
+      }
       reconstructedFiles.push({
         filePath,
         relPath,
@@ -637,7 +728,8 @@ export class HistoryService {
   }
 
   private async readWorkspaceFile(cwd: string, relPath: string): Promise<string | null> {
-    const abs = path.join(cwd, relPath);
+    const abs = this.joinCwd(cwd, relPath);
+    if (abs === null) return null;
     try {
       return await fs.readFile(abs, 'utf8');
     } catch (err) {
@@ -646,8 +738,22 @@ export class HistoryService {
     }
   }
 
-  private joinCwd(cwd: string, relPath: string): string {
-    return path.join(cwd, relPath);
+  /**
+   * Resolve `cwd + relPath` into an absolute path, rejecting attempts to
+   * escape `cwd`. `relPath` is sourced from the persisted event log today
+   * (extension-controlled), so this is defence-in-depth — but cheap and
+   * future-proofs against any new code path that wires user-controlled
+   * relative paths through here.
+   */
+  private joinCwd(cwd: string, relPath: string): string | null {
+    const resolvedCwd = path.resolve(cwd);
+    const abs = path.resolve(resolvedCwd, relPath);
+    const rel = path.relative(resolvedCwd, abs);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      this.opts.logger.warn('history', 'path.escape.rejected', { cwd: resolvedCwd, relPath });
+      return null;
+    }
+    return abs;
   }
 
   /**
@@ -712,6 +818,7 @@ export class HistoryService {
       cur.sessions = cur.sessions.filter((s) => s.sessionId !== sessionId);
     });
     this.pendingSummaryCache = null;
+    this.emitChange({ sessionId, kind: 'session-deleted' });
 
     return { blobsDeleted };
   }

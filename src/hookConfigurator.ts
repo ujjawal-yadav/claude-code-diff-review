@@ -45,6 +45,31 @@ import { agentAdapters } from './adapters/index.js';
 export const HOOK_MARKER_KEY   = 'x-claude-review-extension';
 export const HOOK_MARKER_VALUE = 'v1';
 
+/**
+ * Pattern that uniquely identifies our extension's hook URLs. Used to strip
+ * legacy unmarked entries that older extension versions wrote without the
+ * marker — those would otherwise live alongside the current marked entries
+ * forever and cause duplicate-hook execution (which has caused real auth
+ * failures in the field, see 2026-05-19 debugging log).
+ */
+const OUR_HOOK_URL_RE = /^http:\/\/127\.0\.0\.1:\d+\/(pre-tool-use|post-tool-use|stop)$/;
+
+/**
+ * True if `entry` looks like our extension's hook config (matches our URL
+ * pattern even when the marker is absent). Used by `ensureHooksInstalled`
+ * and `removeHooks` to self-heal users with stale duplicates.
+ */
+function entryLooksLikeOurs(entry: HookEntry): boolean {
+  const hooks = Array.isArray((entry as { hooks?: unknown }).hooks)
+    ? ((entry as { hooks: unknown[] }).hooks)
+    : [];
+  return hooks.some((h) => {
+    if (!h || typeof h !== 'object') return false;
+    const hook = h as { type?: unknown; url?: unknown };
+    return hook.type === 'http' && typeof hook.url === 'string' && OUR_HOOK_URL_RE.test(hook.url);
+  });
+}
+
 interface HookEntry {
   [k: string]: unknown;
   matcher?: string;
@@ -70,6 +95,8 @@ export interface HookConfigOptions {
   port: number;
   /** Install scope (Phase α Track 2). */
   scope: InstallScope;
+  /** Optional — used to log when legacy unmarked entries are auto-stripped. */
+  logger?: import('./logger.js').Logger;
 }
 
 export interface RemoveHooksOptions {
@@ -112,12 +139,25 @@ export async function ensureHooksInstalled(opts: HookConfigOptions): Promise<voi
   }) as Record<'PreToolUse' | 'PostToolUse' | 'Stop', HookEntry>;
 
   root.hooks = root.hooks ?? {};
+  let strippedLegacy = 0;
   for (const event of ['PreToolUse', 'PostToolUse', 'Stop'] as const) {
     const arr = root.hooks[event] ?? [];
-    // Strip our own marked entries (handles version upgrades + port changes).
-    const userOwned = arr.filter((e) => e?.[HOOK_MARKER_KEY] !== HOOK_MARKER_VALUE);
+    // Strip our own marked entries (handles version upgrades + port changes)
+    // AND legacy unmarked entries that match our URL pattern (handles users
+    // upgraded from older extension versions that didn't write the marker).
+    const userOwned = arr.filter((e) => {
+      if (e?.[HOOK_MARKER_KEY] === HOOK_MARKER_VALUE) return false;
+      if (entryLooksLikeOurs(e)) {
+        strippedLegacy += 1;
+        return false;
+      }
+      return true;
+    });
     userOwned.push(generated[event]);
     root.hooks[event] = userOwned;
+  }
+  if (strippedLegacy > 0) {
+    opts.logger?.info('hooks', 'legacy.stripped', { count: strippedLegacy });
   }
 
   await atomicWrite(settingsPath, JSON.stringify(root, null, 2) + '\n');
@@ -141,7 +181,14 @@ export async function removeHooks(opts: RemoveHooksOptions): Promise<void> {
   for (const event of Object.keys(root.hooks) as Array<keyof NonNullable<SettingsRoot['hooks']>>) {
     const arr = root.hooks[event];
     if (!arr) continue;
-    const filtered = arr.filter((e) => e?.[HOOK_MARKER_KEY] !== HOOK_MARKER_VALUE);
+    // Remove our marked entries AND legacy unmarked entries matching our URL
+    // pattern, so the uninstall path leaves a clean settings.json regardless
+    // of which extension version originally wrote the entries.
+    const filtered = arr.filter((e) => {
+      if (e?.[HOOK_MARKER_KEY] === HOOK_MARKER_VALUE) return false;
+      if (entryLooksLikeOurs(e)) return false;
+      return true;
+    });
     if (filtered.length === 0) {
       delete root.hooks[event];
     } else {

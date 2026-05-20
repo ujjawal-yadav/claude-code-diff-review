@@ -19,7 +19,10 @@ import { z } from 'zod';
 
 export const EVENT_SCHEMA_VERSION = 1 as const;
 
-export type AgentId = 'claude-code' | 'opencode';
+// Single source of truth lives in `src/types.ts`. Re-exported here for
+// back-compat with existing imports (e.g., `historyTypes.ts`).
+import type { AgentId } from '../types.js';
+export type { AgentId };
 
 export interface BaseEvent {
   v: typeof EVENT_SCHEMA_VERSION;

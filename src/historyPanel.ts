@@ -54,10 +54,28 @@ interface PanelState {
   pending: HistoryHostToWebview[];
   flushScheduled: boolean;
   ready: boolean;
+  /**
+   * Live-update wiring (2026-05-19). Set when openOrFocus subscribes to
+   * HistoryService.addChangeListener; called on dispose to drop the listener.
+   */
+  unsubscribe?: () => void;
+  /**
+   * Trailing-edge debounce timer for live session-list refresh. Cleared on
+   * dispose so a refresh can't fire against a torn-down panel.
+   */
+  refreshTimer?: NodeJS.Timeout;
 }
 
 export class HistoryPanelManager {
   private panel: PanelState | undefined;
+
+  /**
+   * Debounce window for live session-list refreshes. Trailing-edge — absorbs
+   * Claude's burst-write pattern (5–10 history events in <50ms during a turn)
+   * and posts one fresh snapshot after the burst settles. Tuned well under
+   * perceptual latency while keeping disk reads cheap.
+   */
+  private static readonly LIST_REFRESH_DEBOUNCE_MS = 300;
 
   constructor(private readonly opts: HistoryPanelOptions) {}
 
@@ -88,6 +106,13 @@ export class HistoryPanelManager {
     };
     this.panel = state;
 
+    // Live-update subscription: any record* write on the HistoryService
+    // schedules a debounced re-post of the session list. Stored on state so
+    // disposal can drop it cleanly (preventing leaks across panel reopens).
+    state.unsubscribe = this.opts.history.addChangeListener(() => {
+      this.scheduleSessionListRefresh();
+    });
+
     wp.webview.html = this.renderHtml(wp.webview);
 
     wp.webview.onDidReceiveMessage(
@@ -104,7 +129,11 @@ export class HistoryPanelManager {
     );
 
     wp.onDidDispose(
-      () => { this.panel = undefined; },
+      () => {
+        if (state.refreshTimer) clearTimeout(state.refreshTimer);
+        state.unsubscribe?.();
+        this.panel = undefined;
+      },
       undefined,
       this.opts.context.subscriptions,
     );
@@ -245,6 +274,32 @@ export class HistoryPanelManager {
       this.opts.logger.warn('historyPanel', 'delete.failed', { sessionId, err: message });
       this.post({ type: 'session-action-result', sessionId, action: 'delete', ok: false, error: message });
     }
+  }
+
+  /**
+   * Trailing-edge debounce: any HistoryService change schedules a single
+   * `listSessions → post(init)` after LIST_REFRESH_DEBOUNCE_MS. Subsequent
+   * changes inside the debounce window coalesce into the same refresh.
+   *
+   * Safe across disposal: the timer is cleared in `onDidDispose`, and the
+   * fired callback re-checks `this.panel` before touching the webview.
+   */
+  private scheduleSessionListRefresh(): void {
+    const state = this.panel;
+    if (!state) return;
+    if (state.refreshTimer) return;
+    state.refreshTimer = setTimeout(async () => {
+      const s = this.panel;
+      if (s) delete s.refreshTimer;
+      if (!this.panel) return;
+      try {
+        const sessions = await this.opts.history.listSessions();
+        if (!this.panel) return;
+        this.post({ type: 'init', sessions, root: this.opts.history.getRoot() });
+      } catch (err) {
+        this.opts.logger.warn('historyPanel', 'liveRefresh.failed', { err: String(err) });
+      }
+    }, HistoryPanelManager.LIST_REFRESH_DEBOUNCE_MS);
   }
 
   private post(msg: HistoryHostToWebview): void {

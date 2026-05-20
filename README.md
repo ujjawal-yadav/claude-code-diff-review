@@ -7,6 +7,8 @@
 
 > Per-hunk review of every change Claude Code makes. Accept, reject, or ask "why?" — without leaving VS Code, and without touching git.
 
+![Per-hunk Accept / Reject / Ask in the editor](https://raw.githubusercontent.com/ujjawal-yadav/claude-code-diff-review/main/assets/feature.png)
+
 Claude Code can autonomously edit dozens of files in a single session. This extension surfaces every change as a session-aware review panel with **per-hunk Accept / Reject / Ask Claude** controls. No git required.
 
 ---
@@ -15,11 +17,43 @@ Claude Code can autonomously edit dozens of files in a single session. This exte
 
 - **Session-aware review** — every file Claude touched in one turn, grouped together.
 - **Per-hunk granularity** — accept one refactor, reject an unrelated formatting change in the same file.
-- **In-context AI chat** — click 💬 Ask on any hunk; chat streams in a side panel scoped to that hunk.
+- **In-context AI chat** — click 💬 Ask on any hunk; chat streams in a side panel scoped to that hunk, with the user's original prompt + surrounding tool calls cited for context.
+- **History panel** — every past session reviewable any time. Resume mid-review work, rollback a turn, or delete from history.
+- **Sub-agent attribution** — files edited inside a `Task` invocation are labelled with the sub-agent description so you know which agent produced which change.
+- **Live updates** — the history panel and pending-count status bar refresh in real-time as Claude runs.
+- **Resilient auth** — bearer token persists across reloads; if a stale terminal returns 401, a one-click recovery toast appears.
 - **Pro / Max plan support** — uses your `claude /login` OAuth credentials automatically. API key still supported for those who have one.
 - **Source Control integration** — files appear in a dedicated SCM panel grouped by review status.
 - **CodeLens gutter buttons** — Accept / Reject directly above each hunk in the editor.
-- **Resilient** — per-file mutex on actions, fuzz-tolerant hunk revert with snapshot fallback, drift detection on external edits.
+
+---
+
+## New in v0.2
+
+### History panel
+
+![History panel showing past sessions, turn timelines, and Resume / Rollback / Delete actions](https://raw.githubusercontent.com/ujjawal-yadav/claude-code-diff-review/main/assets/screenshots/01-history-panel.png)
+
+Every Claude Code session is logged to a content-addressed event log (default 30-day retention; opt out via `claudeReview.history.enabled: false`). Open the history panel via `Claude Review: Open History Panel`. From each session card you can:
+- **Resume Review** — reopens the session in the review panel with all prior accept/reject decisions intact.
+- **Rollback this turn** — restores every file in the session to its pre-edit content.
+- **Delete from history** — permanently removes the event log + content-addressed blobs.
+
+Sessions that start while the panel is open appear automatically; pending-count badges update in real-time.
+
+### Transcript-aware chat
+When you click `💬 Ask Claude` on a hunk, the prompt is augmented with the user's original message that started the turn plus Claude's surrounding tool calls — sourced from `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`. Transcript content is read host-side only and never crosses to the webview. Toggle with `claudeReview.chat.transcriptContext`.
+
+### Sub-agent attribution
+Files edited inside a `Task` tool invocation display a `via Task: <description>` chip in the review panel's file list and an inline `· via Task: <description>` label in the history panel's turn cards.
+
+### Pending status bar
+A second status-bar item — `↶ N pending` — shows the total count of unfinished hunks across all recoverable sessions in the last 7 days. Click to open the panel.
+
+### Resilient hook auth
+- Bearer token is stored in OS keychain and reused across activations — terminals stay aligned even after window reloads.
+- If hooks return 401 (e.g., a terminal opened before extension activation), a burst-detector toast surfaces a one-click recovery: `[Open New Terminal]`, `[Show Logs]`, `[Rotate Token]`.
+- Stale hook entries from older extension versions are auto-stripped on activation.
 
 ---
 

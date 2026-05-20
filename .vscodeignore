@@ -17,3 +17,10 @@ vitest.config.ts
 PROJECT_TRACKER.md
 dist/sbom.cdx.json
 *.vsix
+
+# Marketplace assets: the icon ships in the VSIX (referenced from package.json),
+# but the hero/feature image and screenshots are served from GitHub raw URLs
+# in the README — including them in the VSIX would bloat the package by ~1.3 MB
+# without any consumer-visible benefit.
+assets/feature.png
+assets/screenshots/**

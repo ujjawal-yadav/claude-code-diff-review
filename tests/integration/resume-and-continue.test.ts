@@ -170,7 +170,7 @@ describe('Resume + Claude continuation (Bug B + C regression)', () => {
     const bRelPath = 'b.ts';
     const bBefore = '';
     const bAfter = 'brand new file\n';
-    let bDisk = bAfter; // Claude wrote it to disk.
+    const bDisk = bAfter; // Claude wrote it to disk.
 
     // Mock readFile for both a and b.
     const aOriginalRead = (orch as unknown as { read: (p: AbsPath) => Promise<string> }).read;
