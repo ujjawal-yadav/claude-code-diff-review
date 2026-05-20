@@ -2,15 +2,25 @@
   "name": "claude-code-diff-review",
   "displayName": "Claude Code Diff Review",
   "description": "Per-hunk review of Claude Code session changes with in-context AI chat. Pro/Max OAuth and API-key auth supported.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "UjjawalYadav",
   "license": "MIT",
   "engines": {
     "vscode": "^1.85.0",
     "node": ">=18"
   },
-  "categories": ["Other", "SCM Providers"],
-  "keywords": ["claude", "claude-code", "diff", "review", "ai", "anthropic"],
+  "categories": [
+    "Other",
+    "SCM Providers"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "diff",
+    "review",
+    "ai",
+    "anthropic"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/ujjawal-yadav/claude-code-diff-review.git"
@@ -27,87 +37,200 @@
     "theme": "dark"
   },
   "main": "./dist/extension.js",
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "commands": [
-      { "command": "claudeReview.openPanel",          "title": "Claude Review: Open Review Panel" },
-      { "command": "claudeReview.removeHooks",        "title": "Claude Review: Remove Hooks" },
-      { "command": "claudeReview.switchInstallScope", "title": "Claude Review: Switch Install Scope (user ↔ workspace)" },
-      { "command": "claudeReview.setApiKey",          "title": "Claude Review: Set Anthropic API Key" },
-      { "command": "claudeReview.clearApiKey",        "title": "Claude Review: Clear Anthropic API Key" },
-      { "command": "claudeReview.setOAuthToken",      "title": "Claude Review: Set Claude OAuth Token (Max plan)" },
-      { "command": "claudeReview.clearOAuthToken",    "title": "Claude Review: Clear Claude OAuth Token" },
-      { "command": "claudeReview.useClaudeCodeAuth",  "title": "Claude Review: Use Claude Code Auth (probe & report)" },
-      { "command": "claudeReview.rotateBearerToken",  "title": "Claude Review: Rotate Bearer Token" },
-      { "command": "claudeReview.showLog",            "title": "Claude Review: Show Log" },
-      { "command": "claudeReview.openHistory",        "title": "Claude Review: Open History Panel" }
+      {
+        "command": "claudeReview.openPanel",
+        "title": "Claude Review: Open Review Panel"
+      },
+      {
+        "command": "claudeReview.removeHooks",
+        "title": "Claude Review: Remove Hooks"
+      },
+      {
+        "command": "claudeReview.switchInstallScope",
+        "title": "Claude Review: Switch Install Scope (user ↔ workspace)"
+      },
+      {
+        "command": "claudeReview.setApiKey",
+        "title": "Claude Review: Set Anthropic API Key"
+      },
+      {
+        "command": "claudeReview.clearApiKey",
+        "title": "Claude Review: Clear Anthropic API Key"
+      },
+      {
+        "command": "claudeReview.setOAuthToken",
+        "title": "Claude Review: Set Claude OAuth Token (Max plan)"
+      },
+      {
+        "command": "claudeReview.clearOAuthToken",
+        "title": "Claude Review: Clear Claude OAuth Token"
+      },
+      {
+        "command": "claudeReview.useClaudeCodeAuth",
+        "title": "Claude Review: Use Claude Code Auth (probe & report)"
+      },
+      {
+        "command": "claudeReview.rotateBearerToken",
+        "title": "Claude Review: Rotate Bearer Token"
+      },
+      {
+        "command": "claudeReview.showLog",
+        "title": "Claude Review: Show Log"
+      },
+      {
+        "command": "claudeReview.openHistory",
+        "title": "Claude Review: Open History Panel"
+      }
     ],
     "configuration": {
       "title": "Claude Code Diff Review",
       "properties": {
-        "claudeReview.installScope":            { "type": "string",  "default": "user",       "enum": ["user", "workspace"], "description": "Where to install Claude Code hooks. `user` (default) writes to ~/.claude/settings.json so every project picks them up automatically. `workspace` writes to <workspace>/.claude/settings.json — per-project. Use the 'Switch Install Scope' command to toggle." },
-        "claudeReview.history.enabled":         { "type": "boolean", "default": true,         "description": "Persist every Claude Code turn (started, stopped, hunk decisions) to a content-addressed event log. Powers the History panel and crash recovery. Disable to opt out entirely; existing logs are not deleted." },
-        "claudeReview.history.retentionDays":   { "type": "number",  "default": 30,           "description": "Number of days to retain Memory Design event log sessions. The retention sweeper removes older sessions + their unreferenced blobs every 10 minutes." },
-        "claudeReview.crashRecoveryToast.enabled": { "type": "boolean", "default": true,      "description": "Deprecated in v0.3 — superseded by the status-bar pending-reviews indicator. When true, surfaces a one-time toast on activation if any session has an open turn within the last 7 days. The status bar covers a strict superset of this case; the toast is retained for one release to ease the v0.2 → v0.3 transition. Default will flip to false in v0.4." },
-        "claudeReview.chat.transcriptContext":  { "type": "boolean", "default": true,         "description": "Inject Claude Code's transcript context (the user's original prompt + Claude's surrounding tool calls) into hunk chat queries. Off → chat sees only the hunk diff. Transcript content is read host-side only and never forwarded to the webview." },
-        "claudeReview.port":                    { "type": "number",  "default": 53117,        "description": "Preferred loopback port. 0 = always dynamic." },
-        "claudeReview.autoOpenPanel":           { "type": "boolean", "default": true,         "description": "Open the review panel automatically when Claude Code finishes a turn." },
-        "claudeReview.defaultDiffView":         { "type": "string",  "default": "split",      "enum": ["split", "unified"], "description": "Initial diff view mode." },
-        "claudeReview.chatModel":               { "type": "string",  "default": "claude-haiku-4-5-20251001", "description": "Anthropic model used for hunk chat. Haiku is fast and cheap and a good fit for explaining a single hunk; switch to a larger model (e.g. claude-sonnet-4-6, claude-opus-4-7) for deeper reviews." },
-        "claudeReview.chatMaxTokens":           { "type": "number",  "default": 2048,         "description": "Maximum output tokens per chat response." },
-        "claudeReview.maxSessionBytes":         { "type": "number",  "default": 52428800,     "description": "Maximum bytes of original-file snapshots retained per session." },
-        "claudeReview.maxFilesPerSession":      { "type": "number",  "default": 200,          "description": "Maximum files tracked per session." },
-        "claudeReview.telemetry":               { "type": "string",  "default": "off",        "enum": ["on", "off"], "description": "Opt in to anonymous usage telemetry. Also gated by VS Code's global telemetry setting." },
-        "claudeReview.logLevel":                { "type": "string",  "default": "info",       "enum": ["debug", "info", "warn", "error"], "description": "Output channel verbosity." }
+        "claudeReview.installScope": {
+          "type": "string",
+          "default": "user",
+          "enum": [
+            "user",
+            "workspace"
+          ],
+          "description": "Where to install Claude Code hooks. `user` (default) writes to ~/.claude/settings.json so every project picks them up automatically. `workspace` writes to <workspace>/.claude/settings.json — per-project. Use the 'Switch Install Scope' command to toggle."
+        },
+        "claudeReview.history.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Persist every Claude Code turn (started, stopped, hunk decisions) to a content-addressed event log. Powers the History panel and crash recovery. Disable to opt out entirely; existing logs are not deleted."
+        },
+        "claudeReview.history.retentionDays": {
+          "type": "number",
+          "default": 30,
+          "description": "Number of days to retain Memory Design event log sessions. The retention sweeper removes older sessions + their unreferenced blobs every 10 minutes."
+        },
+        "claudeReview.crashRecoveryToast.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Deprecated in v0.3 — superseded by the status-bar pending-reviews indicator. When true, surfaces a one-time toast on activation if any session has an open turn within the last 7 days. The status bar covers a strict superset of this case; the toast is retained for one release to ease the v0.2 → v0.3 transition. Default will flip to false in v0.4."
+        },
+        "claudeReview.chat.transcriptContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inject Claude Code's transcript context (the user's original prompt + Claude's surrounding tool calls) into hunk chat queries. Off → chat sees only the hunk diff. Transcript content is read host-side only and never forwarded to the webview."
+        },
+        "claudeReview.port": {
+          "type": "number",
+          "default": 53117,
+          "description": "Preferred loopback port. 0 = always dynamic."
+        },
+        "claudeReview.autoOpenPanel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open the review panel automatically when Claude Code finishes a turn."
+        },
+        "claudeReview.defaultDiffView": {
+          "type": "string",
+          "default": "split",
+          "enum": [
+            "split",
+            "unified"
+          ],
+          "description": "Initial diff view mode."
+        },
+        "claudeReview.chatModel": {
+          "type": "string",
+          "default": "claude-haiku-4-5-20251001",
+          "description": "Anthropic model used for hunk chat. Haiku is fast and cheap and a good fit for explaining a single hunk; switch to a larger model (e.g. claude-sonnet-4-6, claude-opus-4-7) for deeper reviews."
+        },
+        "claudeReview.chatMaxTokens": {
+          "type": "number",
+          "default": 2048,
+          "description": "Maximum output tokens per chat response."
+        },
+        "claudeReview.maxSessionBytes": {
+          "type": "number",
+          "default": 52428800,
+          "description": "Maximum bytes of original-file snapshots retained per session."
+        },
+        "claudeReview.maxFilesPerSession": {
+          "type": "number",
+          "default": 200,
+          "description": "Maximum files tracked per session."
+        },
+        "claudeReview.telemetry": {
+          "type": "string",
+          "default": "off",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "Opt in to anonymous usage telemetry. Also gated by VS Code's global telemetry setting."
+        },
+        "claudeReview.logLevel": {
+          "type": "string",
+          "default": "info",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "description": "Output channel verbosity."
+        }
       }
     },
     "keybindings": [
-      { "command": "claudeReview.openPanel",       "key": "ctrl+shift+r", "mac": "cmd+shift+r" }
+      {
+        "command": "claudeReview.openPanel",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r"
+      }
     ]
   },
   "scripts": {
-    "build":         "node esbuild.config.mjs",
-    "build:watch":   "node esbuild.config.mjs --watch",
-    "typecheck":     "tsc --noEmit && tsc --noEmit -p tsconfig.webview.json",
-    "lint":          "eslint src webview tests --ext .ts,.tsx",
-    "test":          "vitest run",
-    "test:watch":    "vitest",
-    "test:e2e":      "node ./tests/e2e/runTests.cjs",
-    "package":       "vsce package",
+    "build": "node esbuild.config.mjs",
+    "build:watch": "node esbuild.config.mjs --watch",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.webview.json",
+    "lint": "eslint src webview tests --ext .ts,.tsx",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "node ./tests/e2e/runTests.cjs",
+    "package": "vsce package",
     "audit:licenses": "node scripts/auditLicenses.mjs",
-    "audit:sbom":     "node scripts/generateSbom.mjs",
-    "release:check":  "npm run typecheck && npm run lint && npm test && npm run audit:licenses && npm run build",
+    "audit:sbom": "node scripts/generateSbom.mjs",
+    "release:check": "npm run typecheck && npm run lint && npm test && npm run audit:licenses && npm run build",
     "vscode:prepublish": "npm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.1"
   },
   "devDependencies": {
-    "@types/diff":                 "^5.2.2",
-    "@types/node":                 "^20.14.10",
-    "@types/react":                "^18.3.3",
-    "@types/react-dom":            "^18.3.0",
-    "@types/uuid":                 "^10.0.0",
-    "@types/vscode":               "^1.85.0",
+    "@types/diff": "^5.2.2",
+    "@types/node": "^20.14.10",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/uuid": "^10.0.0",
+    "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^7.16.0",
-    "@typescript-eslint/parser":   "^7.16.0",
-    "@vscode/test-electron":       "^2.4.1",
-    "@vscode/vsce":                "^2.31.0",
-    "diff":                        "^5.2.0",
-    "esbuild":                     "^0.23.0",
-    "eslint":                      "^8.57.0",
-    "fastify":                     "^4.28.1",
-    "react":                       "^18.3.1",
-    "react-diff-view":             "^3.2.1",
-    "react-dom":                   "^18.3.1",
-    "react-markdown":              "^9.0.1",
-    "react-virtuoso":              "^4.10.4",
-    "rehype-sanitize":             "^6.0.0",
-    "supertest":                   "^7.0.0",
-    "typescript":                  "^5.5.3",
-    "uuid":                        "^10.0.0",
-    "vitest":                      "^2.0.4",
-    "zod":                         "^3.23.8",
-    "zustand":                     "^4.5.5"
+    "@typescript-eslint/parser": "^7.16.0",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^2.31.0",
+    "diff": "^5.2.0",
+    "esbuild": "^0.23.0",
+    "eslint": "^8.57.0",
+    "fastify": "^4.28.1",
+    "react": "^18.3.1",
+    "react-diff-view": "^3.2.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "react-virtuoso": "^4.10.4",
+    "rehype-sanitize": "^6.0.0",
+    "supertest": "^7.0.0",
+    "typescript": "^5.5.3",
+    "uuid": "^10.0.0",
+    "vitest": "^2.0.4",
+    "zod": "^3.23.8",
+    "zustand": "^4.5.5"
   }
 }
