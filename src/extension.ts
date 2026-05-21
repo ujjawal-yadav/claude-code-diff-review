@@ -5,7 +5,7 @@ import * as crypto from 'node:crypto';
 
 import { Logger, LogLevel } from './logger.js';
 import { SecretManager } from './secretManager.js';
-import { ensureHooksInstalled, hasInstalledHooks, removeHooks as removeHookConfig, InstallScope } from './hookConfigurator.js';
+import { ensureHooksInstalled, hasInstalledHooks, removeHooks as removeHookConfig, decideDualScopeAction, InstallScope } from './hookConfigurator.js';
 import { HistoryService } from './history/historyService.js';
 import { HistoryPanelManager } from './historyPanel.js';
 import { startServer, ServerHandle } from './server.js';
@@ -335,28 +335,84 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
   const installScope = (config.get<string>('installScope') ?? 'user') as InstallScope;
 
-  // Phase α Track 2: collision detection. If both scopes carry our marker,
-  // prefer workspace (more specific) and warn the user.
-  void hasInstalledHooks({ workspaceRoot: root, scope: 'workspace' }).then(async (workspaceHasOurs) => {
-    const userHasOurs = await hasInstalledHooks({ workspaceRoot: root, scope: 'user' });
-    if (workspaceHasOurs && userHasOurs && installScope === 'user') {
-      logger?.warn('extension', 'install.collision', {
-        msg: 'Claude Review hooks found at both user and workspace scope. The workspace-level install will fire (more specific). Remove the redundant copy via "Switch Install Scope".',
-      });
-      void vscode.window.showWarningMessage(
-        'Claude Code Review: hooks are installed at BOTH user and workspace scope. The workspace install takes precedence — remove the duplicate via "Switch Install Scope".',
-      );
-    }
-  }).catch(() => { /* swallow probe errors */ });
-
-  // Phase α Track 2: v0.1.0 → v0.2.0 migration prompt. If the user is on
-  // the new 'user' default but has workspace-level hooks from a prior
-  // install, offer to migrate. One-shot — persists the answer regardless.
+  // v0.2.2 (2026-05-21): dual-scope auto-resolve + v0.1→v0.2 migration prompt,
+  // run sequentially so the migration prompt sees post-resolve state.
+  //
+  // Background: real users have hit a state where BOTH ~/.claude/settings.json
+  // AND <workspace>/.claude/settings.json carry our marker, pointing at
+  // different ports. Claude's hook precedence (workspace > user) routes
+  // hook fires to one instance; the other is orphaned. Prior to v0.2.2 we
+  // just warned. Now we auto-remove the non-active scope, with a
+  // claudeReview.dualScope.allow config gate (undocumented, default false)
+  // for users who deliberately want both.
   const MIGRATION_FLAG = 'claudeReview.migrationV1Asked';
-  if (installScope === 'user' && context.globalState.get<boolean>(MIGRATION_FLAG) !== true && root) {
-    void hasInstalledHooks({ workspaceRoot: root, scope: 'workspace' }).then(async (hasWorkspaceHooks) => {
-      if (!hasWorkspaceHooks) {
-        // Nothing to migrate; quietly persist so we don't ask again.
+  const dualScopeAllow = config.get<boolean>('dualScope.allow') ?? false;
+  void (async () => {
+    let workspaceHasOurs = false;
+    let userHasOurs = false;
+    try {
+      [workspaceHasOurs, userHasOurs] = await Promise.all([
+        hasInstalledHooks({ workspaceRoot: root, scope: 'workspace' }),
+        hasInstalledHooks({ workspaceRoot: root, scope: 'user' }),
+      ]);
+    } catch (err) {
+      logger?.warn('extension', 'hooks.dual-scope.probe-failed', { err: String(err) });
+      return;
+    }
+
+    // --- Dual-scope auto-resolve --------------------------------------------
+    // Decision logic is a pure function in hookConfigurator.ts for unit-testability.
+    const action = decideDualScopeAction({
+      workspaceHasOurs, userHasOurs, installScope, dualScopeAllow,
+      hasWorkspaceRoot: root != null,
+    });
+    switch (action.kind) {
+      case 'none':
+        break;
+      case 'allowed':
+        logger?.info('extension', 'hooks.dual-scope.allowed');
+        void vscode.window.showWarningMessage(
+          'Claude Code Review: hooks installed at BOTH user and workspace scope (dual-scope mode enabled via claudeReview.dualScope.allow). The workspace install takes precedence.',
+        );
+        break;
+      case 'skip-no-workspace':
+        logger?.info('extension', 'hooks.dual-scope.skipped-no-workspace');
+        break;
+      case 'auto-resolve': {
+        try {
+          await removeHookConfig({ workspaceRoot: root, scope: action.cleanScope });
+          logger?.info('extension', 'hooks.dual-scope.resolved', {
+            cleanedScope: action.cleanScope,
+            activeScope: installScope,
+          });
+          // Reflect the cleanup in local state so the migration prompt below
+          // sees the post-resolve world (the cleaned scope no longer has hooks).
+          if (action.cleanScope === 'workspace') workspaceHasOurs = false;
+          else                                    userHasOurs = false;
+        } catch (err) {
+          logger?.error('extension', 'hooks.dual-scope.resolve-failed', {
+            err: String(err),
+            cleanedScope: action.cleanScope,
+          });
+          const SWITCH_SCOPE = 'Switch Install Scope';
+          void vscode.window.showWarningMessage(
+            `Claude Code Review: hooks installed at both scopes; auto-cleanup of ${action.cleanScope} scope failed (${(err as Error).message}). Resolve manually.`,
+            SWITCH_SCOPE,
+          ).then((choice) => {
+            if (choice === SWITCH_SCOPE) {
+              void vscode.commands.executeCommand('claudeReview.switchInstallScope');
+            }
+          });
+        }
+        break;
+      }
+    }
+
+    // --- v0.1→v0.2 migration prompt (existing logic, post-resolve) ---------
+    // Fires when installScope='user' but stale workspace-only hooks remain.
+    // If the auto-resolve above just ran, workspaceHasOurs is already false.
+    if (installScope === 'user' && context.globalState.get<boolean>(MIGRATION_FLAG) !== true && root) {
+      if (!workspaceHasOurs) {
         await context.globalState.update(MIGRATION_FLAG, true);
         return;
       }
@@ -381,8 +437,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await context.globalState.update(MIGRATION_FLAG, true);
       }
       // 'Decide later' or dismissed → leave the flag false; we'll ask again next activation.
-    }).catch((err) => logger?.warn('extension', 'migration.probe.failed', { err: String(err) }));
-  }
+    }
+  })();
 
   if (installScope === 'workspace' && !root) {
     logger.warn('extension', 'no-workspace', { msg: 'workspace install scope but no folder open; hooks not installed' });

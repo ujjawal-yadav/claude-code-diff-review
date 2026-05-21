@@ -196,3 +196,48 @@ describe('hookConfigurator — T2-5 permission denied surfaces gracefully', () =
     }
   });
 });
+
+/**
+ * v0.2.2 (2026-05-21): integration coverage for dual-scope auto-resolve.
+ * The activation IIFE in extension.ts (a) probes both scopes via
+ * `hasInstalledHooks`, (b) calls `decideDualScopeAction` (unit-tested
+ * separately in hookConfigurator.test.ts), (c) invokes `removeHooks` on
+ * the inactive scope when the action is `auto-resolve`. These tests verify
+ * step (c) — that the I/O actually targets the correct scope and leaves
+ * the active scope untouched.
+ */
+describe('hookConfigurator — dual-scope auto-resolve I/O', () => {
+  it('installing both scopes then removing workspace leaves user intact', async () => {
+    // Seed both scopes with our marker.
+    await ensureHooksInstalled({ workspaceRoot: tmpWs1, port: 53117, scope: 'user' });
+    await ensureHooksInstalled({ workspaceRoot: tmpWs1, port: 53118, scope: 'workspace' });
+    expect(await hasInstalledHooks({ workspaceRoot: tmpWs1, scope: 'user' })).toBe(true);
+    expect(await hasInstalledHooks({ workspaceRoot: tmpWs1, scope: 'workspace' })).toBe(true);
+
+    // Simulate the auto-resolve action (installScope='user' → cleanScope='workspace').
+    await removeHooks({ workspaceRoot: tmpWs1, scope: 'workspace' });
+
+    // Workspace cleaned; user intact.
+    expect(await hasInstalledHooks({ workspaceRoot: tmpWs1, scope: 'workspace' })).toBe(false);
+    expect(await hasInstalledHooks({ workspaceRoot: tmpWs1, scope: 'user' })).toBe(true);
+  });
+
+  it('installing both scopes then removing user leaves workspace intact', async () => {
+    await ensureHooksInstalled({ workspaceRoot: tmpWs1, port: 53117, scope: 'user' });
+    await ensureHooksInstalled({ workspaceRoot: tmpWs1, port: 53118, scope: 'workspace' });
+
+    // Simulate auto-resolve when installScope='workspace' → cleanScope='user'.
+    await removeHooks({ workspaceRoot: tmpWs1, scope: 'user' });
+
+    expect(await hasInstalledHooks({ workspaceRoot: tmpWs1, scope: 'user' })).toBe(false);
+    expect(await hasInstalledHooks({ workspaceRoot: tmpWs1, scope: 'workspace' })).toBe(true);
+  });
+
+  it('removing a scope that has no marker is a safe no-op (auto-resolve falls back when only one scope present)', async () => {
+    await ensureHooksInstalled({ workspaceRoot: tmpWs1, port: 53117, scope: 'user' });
+    // Workspace was never installed; removing it should not throw.
+    await expect(removeHooks({ workspaceRoot: tmpWs1, scope: 'workspace' })).resolves.not.toThrow();
+    // User scope unaffected.
+    expect(await hasInstalledHooks({ workspaceRoot: tmpWs1, scope: 'user' })).toBe(true);
+  });
+});

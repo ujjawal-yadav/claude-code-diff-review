@@ -7,6 +7,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: Se
 
 _No unreleased changes yet._
 
+## [0.2.2] — 2026-05-21
+
+A small patch that fixes a real-world dual-scope hook-config bug surfaced during E1 experiment work on 2026-05-21.
+
+### Fixed
+- **Dual-scope hook auto-resolve.** Previously, when both `~/.claude/settings.json` AND `<workspace>/.claude/settings.json` carried our marker entries (a state that can arise when multiple VS Code windows collide on the default port 53117 and fall back to dynamic ports), the extension warned but took no action. Claude Code's hook precedence (workspace > user) then routed hook fires to one extension instance while orphaning the other — a confusing state with no self-service fix.
+  - On activation, the extension now auto-detects the dual-scope state and removes hooks from the inactive scope (the one that doesn't match `claudeReview.installScope`). Logged as `hooks.dual-scope.resolved`.
+  - If removal fails (e.g., file locked), falls back to a warning toast with a `[Switch Install Scope]` action button — degrades to the v0.2.1 behaviour.
+  - Handles both directions symmetrically: previously only the `installScope='user'` + stale workspace case was flagged. The `installScope='workspace'` + stale user case is now handled too.
+
+### Added
+- **`claudeReview.dualScope.allow` config** (undocumented power-user gate, default `false`). Set `true` to deliberately keep both scopes active (e.g., for multi-version testing). When enabled, the auto-resolve is skipped and a warning toast surfaces on activation so the user knows dual-scope mode is intentional.
+- **`decideDualScopeAction` pure function** in `src/hookConfigurator.ts` — the decision logic is now unit-testable without VS Code mocks. 10 new unit tests cover the case matrix.
+
+### Changed
+- The legacy collision-warning toast at `extension.ts:340-348` is replaced by the new auto-resolve logic. Same end-user experience for users who'd previously dismissed the warning; better outcome for users who hadn't seen it.
+- Migration prompt at `extension.ts:354-385` (v0.1→v0.2) now runs sequentially AFTER the dual-scope auto-resolve, so it sees the post-resolve world (no double-prompting).
+
 ## [0.2.1] — 2026-05-20
 
 A small post-release polish patch driven by senior-product review of v0.2.0.

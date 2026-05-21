@@ -7,6 +7,7 @@ import {
   removeHooks,
   HOOK_MARKER_KEY,
   HOOK_MARKER_VALUE,
+  decideDualScopeAction,
 } from '../../src/hookConfigurator.js';
 
 let tmp: string;
@@ -216,5 +217,84 @@ describe('hookConfigurator — legacy unmarked cleanup', () => {
     const root = await readSettings(tmp) as { hooks?: unknown };
     // Nothing left after stripping the legacy entry — hooks block is dropped.
     expect(root.hooks).toBeUndefined();
+  });
+});
+
+/**
+ * v0.2.2 (2026-05-21): unit tests for the pure dual-scope decision function.
+ * Validates the action matrix without any filesystem or vscode mocking.
+ */
+describe('decideDualScopeAction — dual-scope auto-resolve decision', () => {
+  it('returns none when neither scope has our marker', () => {
+    expect(decideDualScopeAction({
+      workspaceHasOurs: false, userHasOurs: false,
+      installScope: 'user', dualScopeAllow: false, hasWorkspaceRoot: true,
+    })).toEqual({ kind: 'none' });
+  });
+
+  it('returns none when only user-scope has our marker (single-scope; expected)', () => {
+    expect(decideDualScopeAction({
+      workspaceHasOurs: false, userHasOurs: true,
+      installScope: 'user', dualScopeAllow: false, hasWorkspaceRoot: true,
+    })).toEqual({ kind: 'none' });
+  });
+
+  it('returns none when only workspace-scope has our marker (single-scope; expected)', () => {
+    expect(decideDualScopeAction({
+      workspaceHasOurs: true, userHasOurs: false,
+      installScope: 'workspace', dualScopeAllow: false, hasWorkspaceRoot: true,
+    })).toEqual({ kind: 'none' });
+  });
+
+  it('auto-resolves to workspace when installScope=user + both present', () => {
+    expect(decideDualScopeAction({
+      workspaceHasOurs: true, userHasOurs: true,
+      installScope: 'user', dualScopeAllow: false, hasWorkspaceRoot: true,
+    })).toEqual({ kind: 'auto-resolve', cleanScope: 'workspace' });
+  });
+
+  it('auto-resolves to user when installScope=workspace + both present + has root', () => {
+    expect(decideDualScopeAction({
+      workspaceHasOurs: true, userHasOurs: true,
+      installScope: 'workspace', dualScopeAllow: false, hasWorkspaceRoot: true,
+    })).toEqual({ kind: 'auto-resolve', cleanScope: 'user' });
+  });
+
+  it('returns allowed when dualScopeAllow=true + both present (user opted in)', () => {
+    expect(decideDualScopeAction({
+      workspaceHasOurs: true, userHasOurs: true,
+      installScope: 'user', dualScopeAllow: true, hasWorkspaceRoot: true,
+    })).toEqual({ kind: 'allowed' });
+  });
+
+  it('returns allowed regardless of installScope when dualScopeAllow=true', () => {
+    expect(decideDualScopeAction({
+      workspaceHasOurs: true, userHasOurs: true,
+      installScope: 'workspace', dualScopeAllow: true, hasWorkspaceRoot: false,
+    })).toEqual({ kind: 'allowed' });
+  });
+
+  it('returns skip-no-workspace when installScope=workspace + both present + no workspace root', () => {
+    expect(decideDualScopeAction({
+      workspaceHasOurs: true, userHasOurs: true,
+      installScope: 'workspace', dualScopeAllow: false, hasWorkspaceRoot: false,
+    })).toEqual({ kind: 'skip-no-workspace' });
+  });
+
+  it('still auto-resolves when installScope=user + no workspace root (the user-scope is unambiguously active)', () => {
+    // Edge case: user has user-scope active, no workspace open, but both
+    // scopes have markers (workspace marker came from a prior workspace).
+    // We can still resolve because the active scope is well-defined.
+    expect(decideDualScopeAction({
+      workspaceHasOurs: true, userHasOurs: true,
+      installScope: 'user', dualScopeAllow: false, hasWorkspaceRoot: false,
+    })).toEqual({ kind: 'auto-resolve', cleanScope: 'workspace' });
+  });
+
+  it('dualScopeAllow takes precedence over skip-no-workspace', () => {
+    expect(decideDualScopeAction({
+      workspaceHasOurs: true, userHasOurs: true,
+      installScope: 'workspace', dualScopeAllow: true, hasWorkspaceRoot: false,
+    })).toEqual({ kind: 'allowed' });
   });
 });

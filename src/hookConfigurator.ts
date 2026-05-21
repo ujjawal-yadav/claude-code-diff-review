@@ -88,6 +88,49 @@ interface SettingsRoot {
 
 export type InstallScope = 'user' | 'workspace';
 
+/**
+ * v0.2.2 (2026-05-21): pure decision function for the dual-scope auto-resolve
+ * at activation time. Extracted so it's unit-testable without VS Code mocks.
+ *
+ * Inputs are observations (probe results from `hasInstalledHooks` for both
+ * scopes + current `installScope` + the user's `dualScope.allow` setting +
+ * whether a workspace folder is open). Output is a discriminated action the
+ * activation code dispatches on.
+ *
+ * Behaviour:
+ *   - Single-scope (or neither) → no-op
+ *   - Both have marker + dualScope.allow=true → user opted in; warn but no remove
+ *   - Both have marker + installScope='workspace' + no workspace root → skip
+ *     (can't safely act without a workspace folder for comparison)
+ *   - Otherwise → auto-resolve by removing the scope that doesn't match
+ *     `installScope` (the inactive one).
+ */
+export type DualScopeAction =
+  | { kind: 'none' }
+  | { kind: 'allowed' }
+  | { kind: 'skip-no-workspace' }
+  | { kind: 'auto-resolve'; cleanScope: InstallScope };
+
+export interface DualScopeInputs {
+  workspaceHasOurs: boolean;
+  userHasOurs: boolean;
+  installScope: InstallScope;
+  dualScopeAllow: boolean;
+  hasWorkspaceRoot: boolean;
+}
+
+export function decideDualScopeAction(opts: DualScopeInputs): DualScopeAction {
+  if (!(opts.workspaceHasOurs && opts.userHasOurs)) return { kind: 'none' };
+  if (opts.dualScopeAllow) return { kind: 'allowed' };
+  if (opts.installScope === 'workspace' && !opts.hasWorkspaceRoot) {
+    return { kind: 'skip-no-workspace' };
+  }
+  return {
+    kind: 'auto-resolve',
+    cleanScope: opts.installScope === 'user' ? 'workspace' : 'user',
+  };
+}
+
 export interface HookConfigOptions {
   /** Workspace root (used for `workspace` scope; ignored for `user` scope). */
   workspaceRoot: string | null;

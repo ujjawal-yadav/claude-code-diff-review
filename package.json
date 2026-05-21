@@ -99,6 +99,11 @@
           ],
           "description": "Where to install Claude Code hooks. `user` (default) writes to ~/.claude/settings.json so every project picks them up automatically. `workspace` writes to <workspace>/.claude/settings.json — per-project. Use the 'Switch Install Scope' command to toggle."
         },
+        "claudeReview.dualScope.allow": {
+          "type": "boolean",
+          "default": false,
+          "description": "Power-user escape hatch. When false (default), the extension auto-removes hook entries from the inactive scope if both ~/.claude/settings.json and <workspace>/.claude/settings.json carry our marker — prevents the dual-instance state where Claude's hook precedence orphans one extension. Set true to deliberately keep both scopes active (e.g., for multi-version testing); a warning toast surfaces on activation when both are present."
+        },
         "claudeReview.history.enabled": {
           "type": "boolean",
           "default": true,
