@@ -2,7 +2,7 @@
   "name": "claude-code-diff-review",
   "displayName": "Claude Code Diff Review",
   "description": "Per-hunk review of Claude Code session changes with in-context AI chat. Pro/Max OAuth and API-key auth supported.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "UjjawalYadav",
   "license": "MIT",
   "engines": {
