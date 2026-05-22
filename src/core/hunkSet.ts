@@ -52,7 +52,12 @@ export function renderFileFromHunkSet(state: HunkSetState): RenderResult {
   }
 
   const sortedIndices = sortedAcceptedIndices(state);
-  const patch = makeMultiHunkPatch(sortedIndices.map((i) => state.allHunks[i]));
+  // v0.4 (A4): for each index, substitute editedHunks[idx] if present.
+  // Substitution preserves oldStart/oldLines so the patch still locates;
+  // only the `+` block + newLines count differs. Unedited hunks pass
+  // through untouched.
+  const resolveHunk = (i: number): StructuredHunk => state.editedHunks.get(i) ?? state.allHunks[i];
+  const patch = makeMultiHunkPatch(sortedIndices.map(resolveHunk));
 
   // Strict first.
   let applied = Diff.applyPatch(state.originalSnapshot, patch);
@@ -70,9 +75,13 @@ export function renderFileFromHunkSet(state: HunkSetState): RenderResult {
   // succeeds alone but fails in combination is an interaction conflict — we
   // attribute that to the last-sorted index as a deterministic fallback so
   // the UI has something specific to highlight.
+  //
+  // v0.4: probes also use the substituted hunk so an edit that itself
+  // introduces a conflict is attributed to the right index, not Claude's
+  // original.
   const conflictingHunks: number[] = [];
   for (const idx of sortedIndices) {
-    const probe = makeMultiHunkPatch([state.allHunks[idx]]);
+    const probe = makeMultiHunkPatch([resolveHunk(idx)]);
     const r = Diff.applyPatch(state.originalSnapshot, probe, { fuzzFactor: 2 });
     if (r === false) conflictingHunks.push(idx);
   }
@@ -122,7 +131,7 @@ export function initialHunkSetState(
 ): HunkSetState {
   const acceptedSet = new Set<number>();
   for (let i = 0; i < allHunks.length; i++) acceptedSet.add(i);
-  return { filePath, originalSnapshot, allHunks, acceptedSet };
+  return { filePath, originalSnapshot, allHunks, acceptedSet, editedHunks: new Map() };
 }
 
 /** Exported for unit tests. */

@@ -25,6 +25,7 @@ const BINDINGS: ReadonlyArray<Binding> = [
   { keys: ['Shift+K'],         description: 'Previous flagged hunk' },
   { keys: ['a'],               description: 'Accept selected hunk' },
   { keys: ['r'],               description: 'Reject selected hunk' },
+  { keys: ['e'],               description: 'Edit selected hunk in place (v0.4)' },
   { keys: ['?'],               description: 'Open chat for selected hunk' },
   { keys: ['Space'],           description: 'Toggle expand/collapse selected file' },
   { keys: ['Esc'],             description: 'Close chat overlay / dismiss this help' },

@@ -179,6 +179,77 @@
 .quickAccept:disabled,
 .quickReject:disabled { opacity: 0.5; cursor: default; }
 
+/* v0.4 (A5): drafts queue inline section between quickActions and composer. */
+.draftsSection {
+  border-top: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+  padding: 4px 14px;
+}
+
+.draftsHeader {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 4px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+}
+
+.draftsHeader:hover { color: var(--vscode-focusBorder); }
+
+.draftsToggle {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.draftsBody {
+  padding: 4px 0 8px;
+}
+
+.draftsList {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.draftRow {
+  padding: 3px 0;
+  font-size: 11px;
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  column-gap: 6px;
+  align-items: baseline;
+}
+
+.draftPath { color: var(--vscode-descriptionForeground); }
+.draftHunk { color: var(--vscode-descriptionForeground); }
+.draftReason { color: var(--vscode-foreground); }
+
+.draftsSendAll {
+  width: 100%;
+  padding: 6px;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: 0;
+  border-radius: 3px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.draftsSendAll:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+}
+
+.draftsSendAll:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .composer {
   border-top: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
   padding: 10px 14px;

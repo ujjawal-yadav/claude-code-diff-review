@@ -7,6 +7,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: Se
 
 _No unreleased changes yet._
 
+## [0.4.0] — 2026-05-22
+
+The **decision-support pivot** continues — v0.3 told you which hunks deserve a closer look; v0.4 adds the missing verbs for acting on them. The three headlines: **edit a hunk in place** before accepting, **attach a reason** when rejecting (drafts queue → one consolidated chat-send), and **rename-aware grouping** so a 20-file refactor isn't 20 separate clicks.
+
+### Added
+
+- **Edit-before-accept (A4)** — every hunk gets a new `✎ Edit` button (or press `e` while it's selected). An inline textarea opens pre-populated with the hunk's current after-view; save commits a per-hunk substitution to disk and flips the hunk's status to `edited` (a new third terminal state alongside `accepted` / `rejected`). Re-editable: an `↶ Undo` reverts to Claude's original; pressing Edit again replaces the prior override. Edits round-trip through the History event log via a new `hunk-edited` event so resumed sessions still show your changes.
+  - Cap: 256 KB per save (silent reject + log above).
+  - Status counts as "decided" for completion logic; files with mixed edited + accepted hunks render as `partial`.
+  - Determinism preserved: rendering remains `originalSnapshot + acceptedSet + editedHunks → content`.
+
+- **Reject-with-feedback + drafts queue (A5)** — after rejecting a hunk, a new `💬 Add reason` button lets you attach a short explanation. Reasons accumulate in a collapsible **Pending feedback (N)** section inside the chat overlay; a `Send all to Claude` button consolidates them into one prompt, dispatches via the existing chat surface, and clears the queue. Reasons are persisted via a new `rejection-reason` event so the queue reconstructs on Resume Review. The future Insights panel (A9) will mine these to surface rejection patterns over time.
+  - Reason cap: 4 KB.
+  - Status guard: reasons only attach to currently-rejected hunks (drops silently otherwise).
+
+- **Rename grouping (A8 cheap)** — heuristic over hunk content: when ≥3 hunks share an identical single-identifier rename (`oldToken` → `newToken`, both ≥3 chars), they cluster into a group. Each member gets an `↻ rename · N more` chip on its header; clicking expands an inline panel listing every member with `✓ Accept all` / `✗ Reject all` bulk actions. Detection is pure-token (no LLM); false positives are bounded by the minimum group size and length filter. True semantic clustering (full-LLM) is deferred to v1.x.
+
+- **Show-flagged-only filter** — toggle in the session header (`🏷 Flagged only` / `🏷 All files`). Hides files whose neither file-level nor any hunk-level flag is set (file-level filter; hunks within shown files all stay visible). Persisted to webview memento.
+
+- **Wrap-long-lines toggle** — toggle in the session header (`⏎ Wrap on` / `⏎ Wrap off`). When on, the split + unified diff views switch from `white-space: pre` to `pre-wrap` so long lines wrap instead of clipping. Persisted to webview memento.
+
+- New keyboard shortcut: **`e`** — enter edit mode on the selected hunk (pending only). Listed in the help overlay.
+
+### Changed
+
+- **`claudeReview.crashRecoveryToast.enabled` default flipped to `false`** — the status-bar pending-reviews indicator (v0.3) covers a strict superset of the activation toast's role. Set this back to `true` to re-enable the toast for one more release; the setting will be removed entirely in v0.5.
+- New optional fields on the core review types: `HunkSetState.editedHunks`, `HunkReview.renameGroupId`, `SessionReview.renameGroups`. Forward-compatible — older event logs reconstruct without them.
+
+### Internal
+
+- New event-log kinds: `hunk-edited`, `rejection-reason`. Tolerant decode preserved (readers skip unknown kinds; downgrading to v0.3 won't crash on a v0.4 log, you'll just lose the new affordances).
+- New module `src/renameGrouper.ts` (pure heuristic, ~80 LOC).
+- Shared inline-expansion primitive: `webview/components/InlineExpandingPanel.tsx`. Used by the edit textarea, the rejection-reason input, and the rename-group panel — same focus/Esc/Ctrl+Enter handling across all three.
+
+### Tests
+
+- 30 new tests across Wave 1 (edit), Wave 2 (rejection reasons + chat-side batch), and Wave 3 (rename grouping). Total 439 / 439 passing.
+
 ## [0.3.0] — 2026-05-22
 
 The first **decision-support** release. Prior releases optimised the mechanics of reviewing each hunk; v0.3 starts adding signal about which hunks are worth your attention in the first place. The headline additions are risk-flag triage on files and hunks, keyboard-driven review for rapid pass-through, and a fix for the per-line scrollbar mess in split view.

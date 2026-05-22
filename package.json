@@ -2,7 +2,7 @@
   "name": "claude-code-diff-review",
   "displayName": "Claude Code Diff Review",
   "description": "Per-hunk review of Claude Code session changes with in-context AI chat. Pro/Max OAuth and API-key auth supported.",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "publisher": "UjjawalYadav",
   "license": "MIT",
   "engines": {
@@ -116,8 +116,8 @@
         },
         "claudeReview.crashRecoveryToast.enabled": {
           "type": "boolean",
-          "default": true,
-          "description": "Deprecated in v0.3 — superseded by the status-bar pending-reviews indicator. When true, surfaces a one-time toast on activation if any session has an open turn within the last 7 days. The status bar covers a strict superset of this case; the toast is retained for one release to ease the v0.2 → v0.3 transition. Default will flip to false in v0.4."
+          "default": false,
+          "description": "Deprecated. Off by default in v0.4 — the status-bar pending-reviews indicator covers a strict superset of cases. Set true to re-enable the activation toast for one more release; this setting will be removed in v0.5."
         },
         "claudeReview.chat.transcriptContext": {
           "type": "boolean",

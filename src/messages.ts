@@ -98,6 +98,54 @@ export const WebviewToHost = z.discriminatedUnion('type', [
    *  Host dispatches `claudeReview.openHistory` so a single source of truth
    *  governs panel lifecycle (matches command-palette entry behaviour). */
   z.object({ type: z.literal('open-history') }),
+  /**
+   * v0.4 (A4 — edit-before-accept). User saved an in-place edit of a hunk's
+   * after view. `editedAfter` is the raw text of the new `+` block (no
+   * diff prefixes). Capped at 256 KB to prevent runaway clipboard pastes;
+   * the host validates again before persisting.
+   */
+  z.object({
+    type: z.literal('save-hunk-edit'),
+    filePath: z.string(),
+    hunkIndex: z.number().int().nonnegative(),
+    editedAfter: z.string().max(256 * 1024),
+  }),
+  /**
+   * v0.4 (A5 — reject-with-feedback). User typed a reason for a previously
+   * rejected hunk. Reason text capped at 4 KB at the wire layer (matches
+   * the transcript user-prompt budget). The host enforces that the hunk
+   * is currently in `rejected` status; mismatches are dropped with a debug
+   * log.
+   */
+  z.object({
+    type: z.literal('add-rejection-reason'),
+    filePath: z.string(),
+    hunkIndex: z.number().int().nonnegative(),
+    reason: z.string().min(1).max(4 * 1024),
+  }),
+  /**
+   * v0.4 (A5): user clicked "Send all to Claude" in the ChatOverlay drafts
+   * panel. Drafts are bundled into one consolidated chat-message via
+   * ChatService.startBatchFeedback. ChatId is webview-minted so the
+   * existing delta/done plumbing works unchanged.
+   */
+  z.object({
+    type: z.literal('send-rejection-feedback'),
+    chatId: z.string().uuid(),
+    filePath: z.string(),
+    hunkIndex: z.number().int().nonnegative(),
+  }),
+  /**
+   * v0.4 (A8 cheap — rename grouping). Bulk decide every hunk in a
+   * rename-detection group. `groupId` is the heuristic key `${old}->${new}`.
+   * Host iterates the group's (filePath, hunkIndex) members and calls
+   * `handleHunkAction` per entry through the same per-file mutex.
+   */
+  z.object({
+    type: z.literal('decide-rename-group'),
+    groupId: z.string(),
+    action: z.enum(['accept', 'reject']),
+  }),
 ]);
 export type WebviewToHost = z.infer<typeof WebviewToHost>;
 
@@ -185,6 +233,22 @@ export type HostToWebview =
        *  undo stack so the webview can enable/disable the ↶ Undo button. */
       type: 'undo-stack-changed';
       depth: number;
+    }
+  | {
+      /**
+       * v0.4 (A5): the orchestrator's drafts queue changed. Webview replaces
+       * its local mirror with this list (full replacement is cheaper than
+       * diffing for a queue with realistic max ~50 entries). Fires after
+       * add, send-bundle (clear), and adoptReconstructed.
+       */
+      type: 'rejection-drafts';
+      drafts: Array<{
+        filePath: string;
+        relPath: string;
+        hunkIdx: number;
+        reason: string;
+        ts: number;
+      }>;
     };
 
 // --------------------------------------------------------------------------

@@ -109,7 +109,7 @@ export interface ReconstructedFileReview {
     newStart: number; newLines: number;
     header: string;
     lines: string[];
-    status: 'pending' | 'accepted' | 'rejected';
+    status: 'pending' | 'accepted' | 'rejected' | 'edited';
     decidedAt?: number;
   }>;
 }
@@ -147,9 +147,35 @@ export interface ReconstructedSessionReview {
       lines: string[];
     }>;
     acceptedSet: number[];
+    /**
+     * v0.4 (A4): per-hunk edit overrides reconstructed from `hunk-edited`
+     * events. Each entry is the substituted hunk; oldStart/oldLines are
+     * preserved from Claude's original. Adoption seeds the live
+     * `HunkSetState.editedHunks` map from this array.
+     */
+    editedHunks: Array<{
+      index: number;
+      oldStart: number; oldLines: number;
+      newStart: number; newLines: number;
+      header: string;
+      lines: string[];
+    }>;
   }>;
   /** Per-file drift classification by relPath. */
   driftPerFile: Record<string, FileDriftStatus>;
   /** Source-of-truth: timestamp of the most recent event in the log. */
   lastEventAt: number;
+  /**
+   * v0.4 (A5 — reject-with-feedback). Drafts queue reconstructed from
+   * `rejection-reason` events. Ordered by event timestamp. `adoptReconstructed`
+   * copies into `orchestrator.rejectionDrafts.get(sid)` so the ChatOverlay
+   * drafts panel shows pending feedback after Resume.
+   */
+  rejectionReasons: Array<{
+    filePath: string;
+    relPath: string;
+    hunkIdx: number;
+    reason: string;
+    ts: number;
+  }>;
 }

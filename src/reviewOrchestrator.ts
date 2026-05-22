@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { computeDiff } from './diffEngine.js';
 import { flagFile, flagHunk } from './riskFlagger.js';
 import { initialHunkSetState, renderFileFromHunkSet } from './core/hunkSet.js';
+import { annotateRenameGroups, groupRenames } from './renameGrouper.js';
 import type { HistoryService } from './history/historyService.js';
 import type { ReconstructedSessionReview } from './history/historyTypes.js';
 import { Logger } from './logger.js';
@@ -69,6 +70,12 @@ export interface PanelGateway {
   postSetConflict(sessionId: SessionId, filePath: AbsPath, attemptedHunkIndex: number, conflictingHunks: number[]): void;
   /** Option A: tell the webview the current undo-stack depth (0 ⇒ disable ↶). */
   postUndoStackDepth(sessionId: SessionId, depth: number): void;
+  /**
+   * v0.4 (A5): push the pending drafts queue. Webview replaces its mirror
+   * with the supplied list — full replacement is cheaper than diffing for
+   * a queue with realistic max size (<50 entries).
+   */
+  postRejectionDrafts(sessionId: SessionId, drafts: ReadonlyArray<RejectionDraft>): void;
   close(sessionId: SessionId): void;
 }
 
@@ -169,6 +176,14 @@ export class ReviewOrchestrator {
    */
   private readonly undoStack = new Map<SessionId, UndoSnapshot[]>();
   private static readonly UNDO_STACK_CAP = 50;
+
+  /**
+   * v0.4 (A5 — reject-with-feedback). Per-session pending drafts queue.
+   * Populated by `handleRejectionReason` (Wave 2) and by `adoptReconstructed`
+   * on Resume Review. Cleared on `dismissSession`. Shape mirrors the on-disk
+   * event so we can hand the array straight to the webview drafts panel.
+   */
+  private readonly rejectionDrafts = new Map<SessionId, RejectionDraft[]>();
 
   private readonly write: NonNullable<OrchestratorOptions['writeFile']>;
   private readonly read:  NonNullable<OrchestratorOptions['readFile']>;
@@ -402,11 +417,22 @@ export class ReviewOrchestrator {
       // Option A: snapshot for undo so "undo of undo" works.
       const snapshot = this.snapshotForUndo(sid, [file], 'undo-hunk', hunkIndex);
 
+      const wasEdited   = hunk.status === 'edited';
       const wasAccepted = hunk.status === 'accepted';
-      // Inverse-toggle: if accepted → remove from set; if rejected → add back.
+      // v0.4 (A4): undoing an edited hunk drops the substitution AND removes
+      // the index from the set (Claude's original `+` block is no longer
+      // applied — the hunk reverts to pending). Path goes through
+      // applyHunkSetChange so the render+write happens under the lock.
+      const hunkSetState = this.getHunkSet(sid, absFile);
       const outcome = await this.applyHunkSetChange(sid, file, (set) => {
-        if (wasAccepted) set.delete(hunkIndex);
-        else             set.add(hunkIndex);
+        if (wasEdited) {
+          set.delete(hunkIndex);
+          hunkSetState?.editedHunks.delete(hunkIndex);
+        } else if (wasAccepted) {
+          set.delete(hunkIndex);
+        } else {
+          set.add(hunkIndex);
+        }
       });
 
       if (!outcome.ok) {
@@ -443,9 +469,218 @@ export class ReviewOrchestrator {
       );
 
       this.opts.logger.info('orchestrator', 'hunk.undone', {
-        sid, file: absFile, hunk: hunkIndex, previousStatus: wasAccepted ? 'accepted' : 'rejected',
+        sid, file: absFile, hunk: hunkIndex,
+        previousStatus: wasEdited ? 'edited' : (wasAccepted ? 'accepted' : 'rejected'),
       });
     });
+  }
+
+  /**
+   * v0.4 (A4 — edit-before-accept). User saved an in-place edit of a hunk's
+   * `+` block. Mirrors `handleHunkAction` shape (lock → snapshot → set
+   * mutation → render+write → log audit event). Edit eligibility per L6:
+   * pending hunks only — if the hunk has already been decided, the caller
+   * must undo first. Re-editing a previously edited hunk REPLACES the
+   * override (per L1 re-editable semantics).
+   */
+  async handleEditHunk(
+    sessionId: string,
+    filePath: string,
+    hunkIndex: number,
+    editedAfter: string,
+  ): Promise<void> {
+    const sid = asSessionId(sessionId);
+    const review = this.sessions.get(sid);
+    if (!review) {
+      this.opts.logger.warn('orchestrator', 'edit.no-session', { sid });
+      return;
+    }
+    const absFile = asAbsPath(filePath);
+    const file = this.getFile(sid, absFile);
+    if (!file) {
+      this.opts.logger.warn('orchestrator', 'edit.no-file', { sid, filePath });
+      return;
+    }
+    // Defensive size cap (matches wire-schema guard at messages.ts).
+    const MAX_EDIT_BYTES = 256 * 1024;
+    if (Buffer.byteLength(editedAfter, 'utf8') > MAX_EDIT_BYTES) {
+      this.opts.logger.warn('orchestrator', 'edit.too-large', {
+        sid, filePath, bytes: Buffer.byteLength(editedAfter, 'utf8'),
+      });
+      return;
+    }
+
+    await this.lockFile(absFile, async () => {
+      const hunk = file.hunks[hunkIndex];
+      // L6: only pending hunks may be edited.
+      if (!hunk || hunk.status !== 'pending') return;
+
+      const hunkSet = this.getHunkSet(sid, absFile);
+      if (!hunkSet) return;
+      const original = hunkSet.allHunks[hunkIndex];
+      if (!original) return;
+
+      const newHunk = buildEditedHunk(original, editedAfter);
+
+      // Snapshot before mutating (captures editedHunks deep-clone per L1).
+      const snapshot = this.snapshotForUndo(sid, [file], 'hunk-edit', hunkIndex);
+
+      // Mutate the substitution + set together; render under the lock.
+      const outcome = await this.applyHunkSetChange(sid, file, (set) => {
+        hunkSet.editedHunks.set(hunkIndex, newHunk);
+        set.add(hunkIndex);
+      });
+
+      if (!outcome.ok) {
+        // Render failed — roll back the override too. `applyHunkSetChange`
+        // already rolled back acceptedSet; we mirror for editedHunks.
+        if (outcome.reason === 'set-conflict') {
+          hunkSet.editedHunks.delete(hunkIndex);
+          this.opts.panel.postSetConflict(sid, absFile, hunkIndex, outcome.conflictingHunks);
+        }
+        this.opts.panel.postFileUpdated(sid, absFile, file);
+        return;
+      }
+
+      hunk.status = 'edited';
+      hunk.decidedAt = Date.now();
+      // Reflect the substituted shape on the in-memory HunkReview so the
+      // webview's diff render lines up with on-disk content for any
+      // subsequent panel refresh.
+      hunk.newStart = newHunk.newStart;
+      hunk.newLines = newHunk.newLines;
+      hunk.lines = newHunk.lines.slice();
+      file.status = recomputeFileStatus(file.hunks);
+      review.metrics = recomputeMetrics(review.files);
+      this.opts.panel.postHunkApplied(sid, absFile, hunkIndex, 'edited');
+      // The hunk shape changed — push a full file-updated so the webview
+      // re-renders with the substituted `+` block.
+      this.opts.panel.postFileUpdated(sid, absFile, file);
+      this.pushUndoSnapshot(sid, snapshot);
+      this.notifyChange();
+      this.maybeComplete(review);
+
+      this.recordHunkEditedEvent(
+        sid, file, hunkIndex,
+        editedAfter, outcome.content,
+        original, newHunk,
+      );
+    });
+  }
+
+  /**
+   * v0.4 (A5 — reject-with-feedback). Persist a user-typed reason for an
+   * already-rejected hunk; append to the in-memory drafts queue; post the
+   * updated queue to the webview.
+   *
+   * Status guard: only attaches when the hunk is currently `rejected`.
+   * Drops silently with debug log otherwise (the UI only surfaces this
+   * affordance on rejected hunks, but the host enforces).
+   */
+  async handleRejectionReason(
+    sessionId: string,
+    filePath: string,
+    hunkIndex: number,
+    reason: string,
+  ): Promise<void> {
+    const sid = asSessionId(sessionId);
+    const review = this.sessions.get(sid);
+    if (!review) return;
+    const absFile = asAbsPath(filePath);
+    const file = this.getFile(sid, absFile);
+    if (!file) return;
+    const hunk = file.hunks[hunkIndex];
+    if (!hunk || hunk.status !== 'rejected') {
+      this.opts.logger.debug('orchestrator', 'rejection-reason.bad-status', {
+        sid, filePath, hunkIndex, status: hunk?.status,
+      });
+      return;
+    }
+    const MAX_REASON_BYTES = 4 * 1024;
+    if (Buffer.byteLength(reason, 'utf8') > MAX_REASON_BYTES) {
+      this.opts.logger.warn('orchestrator', 'rejection-reason.too-large', { sid, filePath });
+      return;
+    }
+    const draft: RejectionDraft = {
+      filePath,
+      relPath: file.relPath,
+      hunkIdx: hunkIndex,
+      reason,
+      ts: Date.now(),
+    };
+    let list = this.rejectionDrafts.get(sid);
+    if (!list) { list = []; this.rejectionDrafts.set(sid, list); }
+    list.push(draft);
+    this.opts.panel.postRejectionDrafts(sid, list);
+
+    // Persist to event log (best-effort; failures never block the user).
+    const history = this.opts.history;
+    if (history) {
+      const sessionData = this.opts.store.get(sid);
+      const turnId = sessionData?.currentTurnId ?? sessionData?.lastTurnId;
+      if (turnId) {
+        void history.recordRejectionReason({
+          sessionId: sid,
+          turnId,
+          agentId: this.agentId,
+          ...(file.subagentId ? { subagentId: file.subagentId } : {}),
+          relPath: file.relPath,
+          hunkIdx: hunkIndex,
+          reason,
+        });
+      }
+    }
+    this.notifyChange();
+  }
+
+  /** v0.4 (A5): expose the pending drafts for the webview init payload. */
+  getRejectionDrafts(sessionId: string): RejectionDraft[] {
+    return this.rejectionDrafts.get(asSessionId(sessionId)) ?? [];
+  }
+
+  /** v0.4 (A5): clear the queue (after a successful send-bundle). */
+  clearRejectionDrafts(sessionId: string): void {
+    const sid = asSessionId(sessionId);
+    this.rejectionDrafts.set(sid, []);
+    this.opts.panel.postRejectionDrafts(sid, []);
+    this.notifyChange();
+  }
+
+  /**
+   * v0.4 (A8 cheap — rename grouping). Bulk decide every member of a
+   * rename group. Reuses `handleHunkAction` (one event per hunk) so the
+   * audit trail and per-file mutex remain consistent. Groups that span
+   * many files run their per-file locks in parallel.
+   */
+  async handleRenameGroup(
+    sessionId: string,
+    groupId: string,
+    action: 'accept' | 'reject',
+  ): Promise<void> {
+    const sid = asSessionId(sessionId);
+    const review = this.sessions.get(sid);
+    if (!review) return;
+    const groups = review.renameGroups;
+    if (!groups) return;
+    const members = groups[groupId];
+    if (!members || members.length === 0) return;
+
+    // Group by file so we can do per-file locked bulks rather than
+    // sequential single-hunk actions (cheaper + atomic on undo).
+    const perFile = new Map<string, number[]>();
+    for (const m of members) {
+      const arr = perFile.get(m.filePath) ?? [];
+      arr.push(m.hunkIndex);
+      perFile.set(m.filePath, arr);
+    }
+    await Promise.all(Array.from(perFile.entries()).map(async ([fp, indices]) => {
+      // Sequential within a file — handleHunkAction acquires the lock per
+      // call, which would deadlock if we tried to hold it across the loop.
+      // Sequential calls are fine: one decision lands at a time per file.
+      for (const idx of indices) {
+        await this.handleHunkAction(sessionId, fp, idx, action);
+      }
+    }));
   }
 
   dismissSession(sessionId: string): void {
@@ -455,6 +690,7 @@ export class ReviewOrchestrator {
     this.unindexSession(sid);
     this.unindexHunkSets(sid);
     this.undoStack.delete(sid);
+    this.rejectionDrafts.delete(sid);
     this.opts.store.release(sid);
     try { this.opts.onDismissSession?.(sid); } catch { /* never throw to caller */ }
     this.opts.logger.info('orchestrator', 'session.dismissed', { sid });
@@ -641,6 +877,14 @@ export class ReviewOrchestrator {
       state: 'open',
       metrics: recomputeMetrics(files),
     };
+    // v0.4 (A8 cheap): recompute rename groups from the reconstructed state.
+    // Heuristic runs over current hunk content, which honours user edits
+    // already applied (edited hunks have substituted `+` blocks).
+    const groups = groupRenames(review);
+    if (Object.keys(groups).length > 0) {
+      review.renameGroups = groups;
+      annotateRenameGroups(review, groups);
+    }
     this.sessions.set(sid, review);
     this.indexFiles(sid, files);
 
@@ -649,14 +893,44 @@ export class ReviewOrchestrator {
     const perSession = new Map<AbsPath, HunkSetState>();
     for (const hs of reconstructed.hunkSets) {
       const abs = asAbsPath(hs.filePath);
+      // v0.4 (A4): rebuild editedHunks map from the reconstructed entries.
+      // Each entry is an already-substituted StructuredHunk; seed by index.
+      const editedHunks = new Map<number, StructuredHunk>();
+      for (const eh of hs.editedHunks ?? []) {
+        editedHunks.set(eh.index, {
+          index: eh.index,
+          oldStart: eh.oldStart,
+          oldLines: eh.oldLines,
+          newStart: eh.newStart,
+          newLines: eh.newLines,
+          header: eh.header,
+          lines: eh.lines.slice(),
+        });
+      }
       perSession.set(abs, {
         filePath: abs,
         originalSnapshot: hs.originalSnapshot,
         allHunks: hs.allHunks.map((h) => ({ ...h, lines: h.lines.slice() })),
         acceptedSet: new Set(hs.acceptedSet),
+        editedHunks,
       });
     }
     this.hunkSets.set(sid, perSession);
+
+    // v0.4 (A5): seed the drafts queue from reconstruction. The queue lives
+    // in `rejectionDrafts` so Resume Review shows what the user had pending.
+    if (reconstructed.rejectionReasons.length > 0) {
+      const drafts: RejectionDraft[] = reconstructed.rejectionReasons.map((r) => ({
+        filePath: r.filePath,
+        relPath: r.relPath,
+        hunkIdx: r.hunkIdx,
+        reason: r.reason,
+        ts: r.ts,
+      }));
+      this.rejectionDrafts.set(sid, drafts);
+    } else {
+      this.rejectionDrafts.set(sid, []);
+    }
 
     // Cross-session undo is dev-mode-gated and out of scope for β.0.
     this.undoStack.set(sid, []);
@@ -851,6 +1125,14 @@ export class ReviewOrchestrator {
       state: 'open',
       metrics: recomputeMetrics(files),
     };
+    // v0.4 (A8 cheap): detect rename groups and annotate each member hunk
+    // with `renameGroupId` so the webview can render the chip + group panel.
+    // Pure heuristic over hunk content; no I/O.
+    const groups = groupRenames(review);
+    if (Object.keys(groups).length > 0) {
+      review.renameGroups = groups;
+      annotateRenameGroups(review, groups);
+    }
     this.sessions.set(sid, review);
     this.indexFiles(sid, files);
     // Phase α Track 6: seed initial set state — `acceptedSet = all hunks`
@@ -921,13 +1203,20 @@ export class ReviewOrchestrator {
     }
 
     const previousSet = new Set(hunkSet.acceptedSet);
+    // v0.4 (A4): snapshot the override map's content so the no-op detector
+    // also catches edit-only mutations (set unchanged, edit content changed).
+    // Map equality compares (size, per-key value-by-reference); editedHunks
+    // values are immutable from the renderer's perspective so reference
+    // equality is the right signal.
+    const previousEditSignature = editSignature(hunkSet.editedHunks);
     mutate(hunkSet.acceptedSet);
 
-    // No-op short-circuit: if the set didn't actually change (e.g. accepting
-    // a hunk that's already in the initial-all-accepted set), skip render
-    // and write. Preserves the v0.1.0 behaviour that accept-on-applied is
-    // a free no-op on disk.
-    if (setsEqual(previousSet, hunkSet.acceptedSet)) {
+    // No-op short-circuit: if neither the set NOR the edit overrides
+    // changed (e.g. accepting a hunk that's already in the initial-all-
+    // accepted set with no edit), skip render and write. Preserves the
+    // v0.1.0 behaviour that accept-on-applied is a free no-op on disk.
+    const nextEditSignature = editSignature(hunkSet.editedHunks);
+    if (setsEqual(previousSet, hunkSet.acceptedSet) && previousEditSignature === nextEditSignature) {
       return { ok: true, content: file.after };
     }
 
@@ -1058,6 +1347,51 @@ export class ReviewOrchestrator {
     });
   }
 
+  /**
+   * v0.4 (A4): persist a hunk edit. Resolves turnId via the same
+   * `currentTurnId ?? lastTurnId` fallback as the other record* helpers so
+   * post-Stop edits still attach to the originating turn.
+   */
+  private recordHunkEditedEvent(
+    sid: SessionId,
+    file: FileReview,
+    hunkIdx: number,
+    editedAfter: string,
+    postContent: string,
+    oldHunk: StructuredHunk,
+    newHunk: StructuredHunk,
+  ): void {
+    const history = this.opts.history;
+    if (!history) return;
+    const sessionData = this.opts.store.get(sid);
+    const turnId = sessionData?.currentTurnId ?? sessionData?.lastTurnId;
+    if (!turnId) return;
+    void history.recordHunkEdited({
+      sessionId: sid,
+      turnId,
+      agentId: this.agentId,
+      ...(file.subagentId ? { subagentId: file.subagentId } : {}),
+      relPath: file.relPath,
+      hunkIdx,
+      editedAfter,
+      postContent,
+      oldHunk: {
+        oldStart: oldHunk.oldStart,
+        oldLines: oldHunk.oldLines,
+        newStart: oldHunk.newStart,
+        newLines: oldHunk.newLines,
+        lines: oldHunk.lines.slice(),
+      },
+      newHunk: {
+        oldStart: newHunk.oldStart,
+        oldLines: newHunk.oldLines,
+        newStart: newHunk.newStart,
+        newLines: newHunk.newLines,
+        lines: newHunk.lines.slice(),
+      },
+    });
+  }
+
   private recordSnapshotRevertEvent(sid: SessionId, file: FileReview, postContent: string): void {
     const history = this.opts.history;
     if (!history) return;
@@ -1168,8 +1502,18 @@ export class ReviewOrchestrator {
     const files = new Map<AbsPath, UndoSnapshotFile>();
     for (const file of affected) {
       const hunkSet = this.getHunkSet(sid, file.filePath);
+      // v0.4 (A4): deep-clone editedHunks so post-mutation changes don't
+      // leak back into the captured snapshot. Each entry's `lines` is also
+      // sliced so the stored hunk is independent.
+      const editedSnap = new Map<number, StructuredHunk>();
+      if (hunkSet) {
+        for (const [idx, h] of hunkSet.editedHunks) {
+          editedSnap.set(idx, { ...h, lines: h.lines.slice() });
+        }
+      }
       files.set(file.filePath, {
         acceptedSet: new Set(hunkSet?.acceptedSet ?? []),
+        editedHunks: editedSnap,
         hunkStatuses: file.hunks.map((h) => {
           const entry: { index: number; status: HunkStatus; decidedAt?: number } = {
             index: h.index,
@@ -1240,6 +1584,12 @@ export class ReviewOrchestrator {
 
         // Restore set first so any future read sees a consistent state.
         hunkSet.acceptedSet = new Set(fileSnap.acceptedSet);
+        // v0.4 (A4): restore edit overrides verbatim. Deep-clone so the
+        // live state doesn't share `lines` arrays with the snapshot.
+        hunkSet.editedHunks = new Map();
+        for (const [idx, h] of fileSnap.editedHunks) {
+          hunkSet.editedHunks.set(idx, { ...h, lines: h.lines.slice() });
+        }
 
         // Only write to disk if the content actually differs — avoids
         // spurious writes when the action was a no-op-on-disk (e.g.,
@@ -1393,11 +1743,25 @@ export class ReviewOrchestrator {
         perSession = new Map();
         this.hunkSets.set(sid, perSession);
       }
+      // v0.4 (A4): preserve edit overrides across re-diff. Only hunks whose
+      // index still corresponds to the same content survive (hunksAlignedShallow
+      // above already preserved status). Drop overrides whose index no
+      // longer aligns — they've been invalidated by the external edit.
+      const priorHunkSet = this.hunkSets.get(sid)?.get(absPath);
+      const survivingEdits = new Map<number, StructuredHunk>();
+      if (priorHunkSet) {
+        for (const [idx, h] of priorHunkSet.editedHunks) {
+          if (file.hunks[idx]?.status === 'edited') {
+            survivingEdits.set(idx, { ...h, lines: h.lines.slice() });
+          }
+        }
+      }
       perSession.set(absPath, {
         filePath: absPath,
         originalSnapshot: file.before,
         allHunks: newAllHunks,
         acceptedSet: newAccepted,
+        editedHunks: survivingEdits,
       });
 
       this.opts.panel.postFileUpdated(sid, absPath, file);
@@ -1470,15 +1834,20 @@ function relativePathSafe(cwd: string, absPath: string): string {
 
 function recomputeFileStatus(hunks: HunkReview[]): FileStatus {
   if (hunks.length === 0) return 'accepted';
-  let acc = 0, rej = 0, pen = 0;
+  let acc = 0, rej = 0, ed = 0, pen = 0;
   for (const h of hunks) {
     if (h.status === 'accepted') acc++;
     else if (h.status === 'rejected') rej++;
+    else if (h.status === 'edited') ed++;
     else pen++;
   }
   if (pen > 0) {
-    return acc + rej > 0 ? 'partial' : 'pending';
+    return acc + rej + ed > 0 ? 'partial' : 'pending';
   }
+  // v0.4 (A4 — L7): any edited hunk makes the file `partial` so the user
+  // can spot at a glance that the turn was not pure-Claude. Pure accept or
+  // pure reject still collapses to 'accepted' / 'rejected'.
+  if (ed > 0) return 'partial';
   if (acc > 0 && rej > 0) return 'partial';
   if (rej > 0) return 'rejected';
   return 'accepted';
@@ -1492,6 +1861,10 @@ function recomputeMetrics(files: FileReview[]): SessionMetrics {
       total++;
       if (h.status === 'accepted') accepted++;
       else if (h.status === 'rejected') rejected++;
+      // v0.4: edited hunks count as decided but neither accepted nor
+      // rejected — they have their own bucket logically. Metrics surface
+      // accepted/rejected for now; an `editedHunks` counter can be added
+      // when Insights panel (A9) lands.
     }
   }
   return { totalHunks: total, acceptedHunks: accepted, rejectedHunks: rejected, bytesSnapshotted: bytes };
@@ -1513,6 +1886,83 @@ function hunksAlignedShallow(a: HunkReview, b: HunkReview): boolean {
   return a.oldStart === b.oldStart && a.oldLines === b.oldLines && a.lines.join('\n') === b.lines.join('\n');
 }
 
+/**
+ * v0.4 (A4 — edit-before-accept). Build a substituted `StructuredHunk` from
+ * Claude's original + the user-edited "after view" text.
+ *
+ * Strategy
+ * --------
+ * The user is pre-populated with the hunk's *after view* (context + `+`
+ * lines, prefixes stripped). They freely edit it. We reformulate the hunk
+ * as a pure replacement:
+ *
+ *   - BEFORE side = every `-` and ` ` (context) line from the original,
+ *     prefix-stripped (i.e. the full pre-edit body of the hunk's range).
+ *   - AFTER side  = the user's edited text, line by line.
+ *
+ * Output hunk shape: all the original-before lines as `-` followed by all
+ * user-edited lines as `+`. `oldStart` and `oldLines` are preserved exactly
+ * (the anchor against `originalSnapshot` doesn't change). `newLines` is
+ * the user-edited line count.
+ *
+ * This trades visual fidelity (we lose Claude's `+`/context interleaving)
+ * for correctness — the patch library locates by anchor + before-side
+ * matching, and a single contiguous remove+add block is unambiguous.
+ *
+ * Empty `editedAfter` → newLines is 0 (user deleted the entire after view;
+ * valid — produces a delete-only hunk in this range).
+ *
+ * Returns a new object; never mutates `original`.
+ */
+export function buildEditedHunk(original: StructuredHunk, editedAfter: string): StructuredHunk {
+  // Strip prefix from every '-' / ' ' line in the original; these are the
+  // bytes that exist in the snapshot at `oldStart..oldStart+oldLines-1`.
+  const beforeLines: string[] = [];
+  for (const line of original.lines) {
+    const tag = line.charAt(0);
+    if (tag === '-' || tag === ' ') {
+      beforeLines.push(line.slice(1));
+    }
+  }
+  // Split editedAfter WITHOUT dropping a trailing empty cell — "foo\n" and
+  // "foo" are distinct bodies. `[]` for empty input (user wiped the after).
+  const editedLines = editedAfter.length === 0 ? [] : editedAfter.split('\n');
+
+  const newHunkLines: string[] = [];
+  for (const b of beforeLines) newHunkLines.push('-' + b);
+  for (const a of editedLines) newHunkLines.push('+' + a);
+
+  return {
+    index: original.index,
+    oldStart: original.oldStart,
+    oldLines: original.oldLines,
+    newStart: original.newStart,
+    newLines: editedLines.length,
+    header: original.header,
+    lines: newHunkLines,
+  };
+}
+
+/**
+ * v0.4 (A4): extract the hunk's current "after view" (context + `+` lines,
+ * prefixes stripped, joined by '\n'). Used to pre-populate the edit textarea.
+ *
+ * Mirrors the substitution rule in `buildEditedHunk`: the after view is what
+ * the patched file would contain at this hunk's range. Whether the file
+ * uses LF or CRLF is irrelevant — `diff` normalises to LF when computing
+ * hunks, and the renderer's fuzz-2 retry tolerates platform EOL drift.
+ */
+export function extractHunkAfterView(h: StructuredHunk | HunkReview): string {
+  const out: string[] = [];
+  for (const line of h.lines) {
+    const tag = line.charAt(0);
+    if (tag === '+' || tag === ' ') {
+      out.push(line.slice(1));
+    }
+  }
+  return out.join('\n');
+}
+
 function uniqueWarnings<T extends string>(arr: T[]): T[] {
   return Array.from(new Set(arr));
 }
@@ -1523,6 +1973,13 @@ function uniqueWarnings<T extends string>(arr: T[]): T[] {
 
 interface UndoSnapshotFile {
   acceptedSet: Set<number>;
+  /**
+   * v0.4 (A4): per-hunk edit overrides at the time of the snapshot. Restored
+   * verbatim on undo so an edit-then-undo returns the hunkSet to its prior
+   * substitution state (and the renderer picks up Claude's original `+`
+   * block again for any hunk no longer in this map).
+   */
+  editedHunks: Map<number, StructuredHunk>;
   hunkStatuses: Array<{ index: number; status: HunkStatus; decidedAt?: number }>;
   /** On-disk content immediately before the mutation. */
   after: string;
@@ -1530,18 +1987,59 @@ interface UndoSnapshotFile {
   warnings: FileReview['warnings'];
 }
 
+/**
+ * v0.4 (A5): single pending rejection-reason entry. Lives in the
+ * orchestrator's `rejectionDrafts` map; serialised to the webview verbatim
+ * for the ChatOverlay drafts panel.
+ */
+export interface RejectionDraft {
+  filePath: string;
+  relPath: string;
+  hunkIdx: number;
+  reason: string;
+  ts: number;
+}
+
 interface UndoSnapshot {
-  scope: 'hunk-action' | 'bulk-file' | 'bulk-session' | 'snapshot-revert' | 'undo-hunk';
+  scope: 'hunk-action' | 'bulk-file' | 'bulk-session' | 'snapshot-revert' | 'undo-hunk' | 'hunk-edit';
   /** Affected files keyed by absolute path. */
   files: Map<AbsPath, UndoSnapshotFile>;
   /**
    * Phase β.0 (FR-B0.7): the specific hunk index toggled by the originating
-   * action — populated only when `scope === 'hunk-action' | 'undo-hunk'`.
+   * action — populated only when `scope === 'hunk-action' | 'undo-hunk' | 'hunk-edit'`.
    * Used to attach `target.hunkIdx` on the emitted `undo` event so
    * `reconstructSessionReview` can pinpoint the reverted hunk without
    * inferring it from per-hunk status diffs.
    */
   hunkIdx?: number;
+}
+
+/**
+ * v0.4 (A4): identity signature for the editedHunks override map. Cheap to
+ * compute and compare; two signatures are equal iff every (index, hunk
+ * reference) pair matches. Distinct edits produce distinct StructuredHunk
+ * object identities (buildEditedHunk returns a new object) so reference
+ * equality is sufficient.
+ */
+function editSignature(m: Map<number, StructuredHunk>): string {
+  if (m.size === 0) return '';
+  const parts: string[] = [];
+  // Sorted by index so order doesn't affect equality.
+  const indices = Array.from(m.keys()).sort((a, b) => a - b);
+  for (const i of indices) {
+    const h = m.get(i)!;
+    parts.push(`${i}:${h.lines.length}:${h.newLines}`);
+    // Include first/last line bytes as a cheap fingerprint without
+    // serialising the entire hunk — collisions are still possible but
+    // exceedingly rare in practice (the only consumer of this signature
+    // is no-op detection, which biases false-negatives toward "do the
+    // render anyway" — a safe failure mode).
+    if (h.lines.length > 0) {
+      parts.push(h.lines[0]!);
+      if (h.lines.length > 1) parts.push(h.lines[h.lines.length - 1]!);
+    }
+  }
+  return parts.join('|');
 }
 
 function setsEqual(a: Set<number>, b: Set<number>): boolean {

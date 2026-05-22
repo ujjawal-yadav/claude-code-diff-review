@@ -118,7 +118,14 @@ export interface SessionMetrics {
 // --------------------------------------------------------------------------
 
 export type FileStatus  = 'pending' | 'accepted' | 'rejected' | 'partial';
-export type HunkStatus  = 'pending' | 'accepted' | 'rejected';
+/**
+ * v0.4 (A4): `'edited'` is a third terminal-ish state for hunks that the user
+ * tweaked in place before accepting. Disk content reflects the user's edited
+ * `+` block, not Claude's original. Counts as "decided" for completion logic
+ * but a file with any edited hunk renders as `partial` at the file level so
+ * the user can see at a glance that a turn was not pure-Claude.
+ */
+export type HunkStatus  = 'pending' | 'accepted' | 'rejected' | 'edited';
 export type SessionState = 'opening' | 'open' | 'completed' | 'dismissed';
 
 export type FileWarning =
@@ -166,6 +173,15 @@ export interface HunkReview {
    * `openReview` time. Surfaced as inline badges on the hunk header.
    */
   flags?: RiskFlag[];
+  /**
+   * v0.4 (A8 cheap — rename grouping). When a hunk participates in a
+   * detected single-identifier rename across ≥3 hunks, its `groupId` is
+   * set to `${oldToken}->${newToken}`. The webview renders a chip on the
+   * hunk header that, when clicked, expands a panel listing all members
+   * with "Accept all / Reject all" actions. Undefined when no group
+   * applies.
+   */
+  renameGroupId?: string;
 }
 
 export interface FileReview {
@@ -210,6 +226,14 @@ export interface SessionReview {
   files: FileReview[];
   state: SessionState;
   metrics: SessionMetrics;
+  /**
+   * v0.4 (A8 cheap — rename grouping). Keyed by `${oldToken}->${newToken}`;
+   * value is the list of hunk-membership entries that share that rename.
+   * Populated by `groupRenames` at openReview-time alongside risk flags.
+   * Only groups with size ≥3 are surfaced (small groups likely false
+   * positives). Undefined when no groups were detected for this session.
+   */
+  renameGroups?: Record<string, Array<{ filePath: string; hunkIndex: number }>>;
 }
 
 // --------------------------------------------------------------------------
@@ -235,6 +259,17 @@ export interface HunkSetState {
   allHunks: StructuredHunk[];
   /** Indices into `allHunks` that are currently considered applied. */
   acceptedSet: Set<number>;
+  /**
+   * v0.4 (A4 — edit-before-accept). Per-hunk substitution layer: when an
+   * index is present in this map AND in `acceptedSet`, `renderFileFromHunkSet`
+   * uses the substituted hunk's `lines`/`newLines` instead of `allHunks[idx]`.
+   * Preserves `oldStart`/`oldLines` (the pre-edit anchor) so the multi-hunk
+   * patch still locates correctly against `originalSnapshot`.
+   *
+   * Determinism invariant becomes:
+   *   `originalSnapshot + acceptedSet + editedHunks → content` is total.
+   */
+  editedHunks: Map<number, StructuredHunk>;
 }
 
 export type RenderResult =

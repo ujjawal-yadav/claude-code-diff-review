@@ -40,6 +40,7 @@ class NoopPanel implements PanelGateway {
   postHunkApplied(_sessionId: SessionId, _filePath: AbsPath, _hunkIndex: number, _status: HunkStatus) {}
   postSetConflict(_sessionId: SessionId, _filePath: AbsPath, _attemptedHunkIndex: number, _conflictingHunks: number[]) {}
   postUndoStackDepth(_sid: SessionId, _depth: number) {}
+  postRejectionDrafts(_sid: SessionId, _drafts: ReadonlyArray<{ filePath: string; relPath: string; hunkIdx: number; reason: string; ts: number }>) { void _drafts; }
   postSessionCompleted(_sessionId: SessionId, _metrics: SessionMetrics) {}
   close(_sessionId: SessionId) {}
 }

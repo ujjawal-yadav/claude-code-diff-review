@@ -11,6 +11,9 @@
 
 .status_accepted .header { background: var(--vscode-diffEditor-insertedTextBackground, rgba(80,200,120,0.08)); }
 .status_rejected .header { background: var(--vscode-diffEditor-removedTextBackground,  rgba(255,80,80,0.08)); }
+/* v0.4 (A4): edited hunks get a distinct amber/warning tint so a quick scan
+   surfaces "this is not pure-Claude" at a glance. */
+.status_edited .header { background: rgba(255,180,40,0.10); }
 
 .header {
   display: flex;
@@ -47,6 +50,9 @@
 .btnAccept { background: var(--vscode-testing-iconPassed,#3fb950); color: var(--vscode-editor-background); }
 .btnReject { background: var(--vscode-errorForeground,   #f14c4c); color: var(--vscode-editor-background); }
 .btnChat   { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+/* v0.4 (A4): Edit button — neutral amber to signal "third action" without
+   competing visually with the primary accept/reject pair. */
+.btnEdit   { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 1px solid rgba(255,180,40,0.4); }
 
 .btn:hover:not(:disabled) { filter: brightness(1.1); }
 
@@ -130,3 +136,85 @@
 .cell_del   { background: var(--vscode-diffEditor-removedLineBackground,  rgba(255,80,80,0.16)); }
 .cell_ctx   { background: transparent; }
 .cell_empty { background: var(--vscode-diffEditor-diagonalFill, rgba(127,127,127,0.05)); }
+
+/* v0.4 (A8 cheap): rename-group chip. */
+.renameChip {
+  margin: 0 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  border-radius: 8px;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  border: 1px solid rgba(127,127,127,0.3);
+  cursor: pointer;
+}
+
+.renameChip:hover { filter: brightness(1.1); }
+
+/* v0.4 (A8): rename-group inline panel content. */
+.renameGroupPanel {
+  padding: 8px;
+  font-size: 12px;
+}
+
+.renameGroupHeader {
+  margin-bottom: 6px;
+  color: var(--vscode-foreground);
+}
+
+.renameGroupList {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.renameGroupList li {
+  padding: 2px 0;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.renameGroupActions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.renameGroupAccept,
+.renameGroupReject,
+.renameGroupCancel {
+  padding: 3px 10px;
+  font-size: 11px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.renameGroupAccept {
+  background: var(--vscode-testing-iconPassed, #3fb950);
+  color: var(--vscode-editor-background);
+}
+
+.renameGroupReject {
+  background: var(--vscode-errorForeground, #f14c4c);
+  color: var(--vscode-editor-background);
+}
+
+.renameGroupCancel {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+}
+
+/* v0.4 (Wave 4): wrap-long-lines toggle. When .wrap is on the hunk root,
+   split + unified views relax `white-space: pre` to `pre-wrap` so long
+   lines wrap instead of clipping. */
+.root.wrap .splitCell,
+.root.wrap .lines li {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.root.wrap .splitCell {
+  overflow: visible;
+}

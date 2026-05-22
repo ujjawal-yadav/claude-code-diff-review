@@ -29,8 +29,28 @@ interface Props {
 export function ChatOverlay({ filePath, hunk, onClose }: Props): JSX.Element {
   const chat = useUi((s) => s.chat);
   const appendUserTurn = useUi((s) => s.appendUserTurn);
+  const drafts = useUi((s) => s.drafts);
+  const draftsExpanded = useUi((s) => s.draftsExpanded);
+  const setDraftsExpanded = useUi((s) => s.setDraftsExpanded);
   const [input, setInput] = useState('');
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const onSendDrafts = () => {
+    if (chat?.chatId) return; // streaming in progress
+    if (drafts.length === 0) return;
+    const chatId = makeUuidV4();
+    // Surface the composed prompt locally too so the chat transcript shows
+    // what was actually sent to Claude (matches existing pattern of
+    // appendUserTurn before postMessage).
+    const localText = composeDraftsPreview(drafts);
+    appendUserTurn(localText, chatId);
+    send({
+      type: 'send-rejection-feedback',
+      chatId,
+      filePath,
+      hunkIndex: hunk.index,
+    });
+  };
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -121,6 +141,44 @@ export function ChatOverlay({ filePath, hunk, onClose }: Props): JSX.Element {
         </button>
       </div>
 
+      {/* v0.4 (A5): pending drafts queue inline section. Collapsed by
+          default; expand reveals the list + Send-all action. Hidden
+          entirely when empty so the chat layout stays clean. */}
+      {drafts.length > 0 && (
+        <section className={styles.draftsSection} aria-label="Pending feedback drafts">
+          <button
+            type="button"
+            className={styles.draftsHeader}
+            onClick={() => setDraftsExpanded(!draftsExpanded)}
+            aria-expanded={draftsExpanded}
+          >
+            <span>📝 Pending feedback ({drafts.length})</span>
+            <span className={styles.draftsToggle}>{draftsExpanded ? '▾' : '▸'}</span>
+          </button>
+          {draftsExpanded && (
+            <div className={styles.draftsBody}>
+              <ul className={styles.draftsList}>
+                {drafts.map((d) => (
+                  <li key={`${d.filePath}::${d.hunkIdx}::${d.ts}`} className={styles.draftRow}>
+                    <code className={styles.draftPath}>{d.relPath}</code>
+                    <span className={styles.draftHunk}>hunk {d.hunkIdx + 1}</span>
+                    <span className={styles.draftReason}>"{d.reason}"</span>
+                  </li>
+                ))}
+              </ul>
+              <button
+                type="button"
+                className={styles.draftsSendAll}
+                onClick={onSendDrafts}
+                disabled={!!chat?.chatId}
+              >
+                {chat?.chatId ? 'Streaming…' : `Send all to Claude (${drafts.length})`}
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+
       <form className={styles.composer} onSubmit={onSubmit}>
         <textarea
           ref={inputRef}
@@ -148,6 +206,26 @@ export function ChatOverlay({ filePath, hunk, onClose }: Props): JSX.Element {
       </form>
     </aside>
   );
+}
+
+/**
+ * v0.4 (A5): preview text rendered locally when the user clicks "Send all
+ * to Claude" so the chat transcript shows what was actually sent. Mirrors
+ * the host's `composeBatchFeedbackMessage`. Kept here to avoid host→webview
+ * import; the host re-composes the same shape from its own drafts source
+ * of truth before streaming.
+ */
+function composeDraftsPreview(
+  drafts: ReadonlyArray<{ relPath: string; hunkIdx: number; reason: string }>,
+): string {
+  const lines: string[] = [];
+  lines.push(`I rejected ${drafts.length} hunk${drafts.length === 1 ? '' : 's'} in this turn. Please rework with these in mind:`);
+  lines.push('');
+  for (const d of drafts) {
+    const oneLine = d.reason.replace(/\s+/g, ' ').trim();
+    lines.push(`• ${d.relPath} hunk ${d.hunkIdx + 1}: "${oneLine}"`);
+  }
+  return lines.join('\n');
 }
 
 /**

@@ -41,6 +41,7 @@ class CapturingPanel implements PanelGateway {
   }
   undoDepths: number[] = [];
   postUndoStackDepth(_sid: SessionId, depth: number) { this.undoDepths.push(depth); }
+  postRejectionDrafts(_sid: SessionId, _drafts: ReadonlyArray<{ filePath: string; relPath: string; hunkIdx: number; reason: string; ts: number }>) { void _drafts; }
   postSessionCompleted(sessionId: SessionId, _metrics: SessionMetrics) {
     this.completed.push({ sessionId });
   }

@@ -14,6 +14,18 @@ interface Props {
 export function FileList({ files }: Props): JSX.Element {
   const selectedFile = useUi((s) => s.selectedFile);
   const selectFile   = useUi((s) => s.selectFile);
+  const showFlaggedOnly = useUi((s) => s.showFlaggedOnly);
+
+  // v0.4 (Wave 4): "show flagged only" filter (file-level per L3). A file
+  // is flagged when it carries a file-level flag OR any of its hunks does.
+  // Always render at least one row — falling all the way to zero is a
+  // confusing dead-end; if everything filters out, show the unfiltered list.
+  const filtered = showFlaggedOnly
+    ? files.filter((f) => (f.flags?.length ?? 0) > 0 || f.hunks.some((h) => (h.flags?.length ?? 0) > 0))
+    : files;
+  const display = filtered.length > 0 ? filtered : files;
+
+  files = display;
 
   // Virtualise once we exceed the perf-budget cliff (TRD §15).
   const VIRTUALISE_AT = 50;

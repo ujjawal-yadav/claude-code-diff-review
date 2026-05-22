@@ -28,6 +28,7 @@ function buildStateWithSet(before: string, after: string, indices: number[]): Hu
     originalSnapshot: before,
     allHunks: diff.hunks,
     acceptedSet: new Set(indices),
+      editedHunks: new Map(),
   };
 }
 
@@ -84,6 +85,7 @@ describe('renderFileFromHunkSet — T6-1 toggle round-trip identity', () => {
         lines: ['-something else entirely', '+nothing here matches'],
       }],
       acceptedSet: new Set(),
+      editedHunks: new Map(),
     };
     const result = renderFileFromHunkSet(state);
     expect(result).toEqual({ ok: true, content: before });
@@ -169,6 +171,7 @@ describe('renderFileFromHunkSet — T6-3 coupled hunks', () => {
         },
       ],
       acceptedSet: new Set([0]),
+      editedHunks: new Map(),
     };
     const result = renderFileFromHunkSet(state);
     expect(result.ok).toBe(false);
@@ -262,6 +265,7 @@ describe('renderFileFromHunkSet — binary guard', () => {
       originalSnapshot: 'before\x00binary',
       allHunks: [],
       acceptedSet: new Set(),
+      editedHunks: new Map(),
     };
     const result = renderFileFromHunkSet(state);
     expect(result).toEqual({ ok: false, reason: 'snapshot-binary' });

@@ -74,6 +74,11 @@ export class ReviewPanelManager implements PanelGateway {
       // The flush will pick up only what's relevant for the current state.
       existing.pendingPosts.length = 0;
       this.post(session.sessionId, { type: 'init', session, viewType: this.opts.defaultViewType });
+      // v0.4 (A5): re-send drafts on focus too — the prior panel state may
+      // already have been wiped or never received them (e.g. focused via
+      // command palette on a resumed session).
+      const drafts = this.orchestrator?.getRejectionDrafts(session.sessionId) ?? [];
+      this.post(session.sessionId, { type: 'rejection-drafts', drafts });
       return;
     }
 
@@ -108,6 +113,11 @@ export class ReviewPanelManager implements PanelGateway {
     // Send init after the webview has signalled `ready` (see onMessage),
     // but also queue here in case `ready` already raced past.
     entry.pendingPosts.push({ type: 'init', session, viewType: this.opts.defaultViewType });
+    // v0.4 (A5): queue pending drafts immediately so the ChatOverlay's drafts
+    // section is populated on first render. Empty list is fine; webview
+    // handles {drafts: []} as a no-op.
+    const drafts = this.orchestrator?.getRejectionDrafts(session.sessionId) ?? [];
+    entry.pendingPosts.push({ type: 'rejection-drafts', drafts });
     this.scheduleFlush(entry);
   }
 
@@ -125,6 +135,14 @@ export class ReviewPanelManager implements PanelGateway {
 
   postUndoStackDepth(sessionId: SessionId, depth: number): void {
     this.post(sessionId, { type: 'undo-stack-changed', depth });
+  }
+
+  /**
+   * v0.4 (A5): push the pending drafts queue to the webview.
+   * Spreads the readonly array into a plain array for postMessage safety.
+   */
+  postRejectionDrafts(sessionId: SessionId, drafts: ReadonlyArray<{ filePath: string; relPath: string; hunkIdx: number; reason: string; ts: number }>): void {
+    this.post(sessionId, { type: 'rejection-drafts', drafts: drafts.slice() });
   }
 
   postSessionCompleted(sessionId: SessionId, metrics: SessionMetrics): void {
@@ -277,6 +295,41 @@ export class ReviewPanelManager implements PanelGateway {
         break;
       case 'chat-cancel':
         this.chatService?.cancel(msg.chatId);
+        break;
+      case 'save-hunk-edit':
+        // v0.4 (A4): persist a per-hunk in-place edit. Orchestrator handles
+        // size validation, status guard (pending only), per-file mutex.
+        await o.handleEditHunk(sessionId, msg.filePath, msg.hunkIndex, msg.editedAfter);
+        break;
+      case 'add-rejection-reason':
+        // v0.4 (A5): persist a rejection reason against an already-rejected
+        // hunk. The orchestrator emits the audit event AND appends to the
+        // session's drafts queue, then posts the updated list back via
+        // 'rejection-drafts'.
+        await o.handleRejectionReason(sessionId, msg.filePath, msg.hunkIndex, msg.reason);
+        break;
+      case 'send-rejection-feedback': {
+        // v0.4 (A5): bundle pending drafts into one chat message + clear the
+        // queue. ChatService composes the prompt; uses the panel's existing
+        // chat surface for streaming. Anchor the chat to the supplied
+        // (filePath, hunkIndex) so the UI shows it inline with the hunk
+        // the user is parked on (any draft entry would work — typically
+        // the most recent one).
+        if (!this.chatService) {
+          this.opts.logger.warn('panel', 'chat.no-service');
+          return;
+        }
+        await this.chatService.startBatchFeedback({
+          sessionId,
+          filePath: msg.filePath,
+          hunkIndex: msg.hunkIndex,
+          chatId: msg.chatId,
+        });
+        break;
+      }
+      case 'decide-rename-group':
+        // v0.4 (A8 cheap): bulk decide all hunks in a rename group.
+        await o.handleRenameGroup(sessionId, msg.groupId, msg.action);
         break;
     }
   }

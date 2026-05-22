@@ -60,6 +60,14 @@ export interface ChatStartArgs {
   chatId: string;
 }
 
+export interface ChatBatchFeedbackArgs {
+  sessionId: SessionId;
+  /** Anchor hunk (typically the most recently rejected). */
+  filePath: string;
+  hunkIndex: number;
+  chatId: string;
+}
+
 interface ConvKey {
   sessionId: string;
   filePath: string;
@@ -155,6 +163,92 @@ export class ChatService {
         // fall through with original args.message
       }
     }
+
+    await this.deps.client.streamChat(
+      { hunkDiff, history, userMessage },
+      { onDelta, onDone, onError },
+      controller.signal,
+    );
+  }
+
+  /**
+   * v0.4 (A5 — reject-with-feedback). Bundle every pending rejection draft
+   * into one consolidated chat message + send. Reuses the streaming
+   * infrastructure of `start()` so deltas reach the webview via the same
+   * channel. Drafts are cleared on the orchestrator side AFTER the prompt
+   * is composed (so a race with another add doesn't lose entries).
+   *
+   * Anchor: the chat is associated with `(filePath, hunkIndex)` from args
+   * — typically the hunk the user is parked on. This is just for
+   * conversation-history bucketing; the prompt content covers all drafts.
+   */
+  async startBatchFeedback(args: ChatBatchFeedbackArgs): Promise<void> {
+    const review = this.deps.orchestrator.getSession(args.sessionId);
+    if (!review) {
+      this.deps.panel.postChatError(args.sessionId, args.chatId, {
+        kind: 'unknown', message: 'Session no longer active.', retriable: false,
+      });
+      return;
+    }
+    const drafts = this.deps.orchestrator.getRejectionDrafts(args.sessionId);
+    if (drafts.length === 0) {
+      this.deps.panel.postChatError(args.sessionId, args.chatId, {
+        kind: 'unknown', message: 'No drafts to send.', retriable: false,
+      });
+      return;
+    }
+    const located = this.deps.orchestrator.findFile(args.filePath);
+    const file = located && located.session.sessionId === args.sessionId ? located.file : undefined;
+    const hunk = file?.hunks[args.hunkIndex];
+    if (!file || !hunk) {
+      this.deps.panel.postChatError(args.sessionId, args.chatId, {
+        kind: 'unknown', message: 'Anchor hunk no longer available.', retriable: false,
+      });
+      return;
+    }
+
+    const key = convKey({ sessionId: args.sessionId, filePath: args.filePath, hunkIndex: args.hunkIndex });
+    const history = this.conversations.get(key) ?? [];
+
+    const controller = new AbortController();
+    this.inflight.set(args.chatId, controller);
+
+    const hunkDiff = renderHunkDiff(file.relPath, hunk.header, hunk.lines);
+    const userMessage = composeBatchFeedbackMessage(drafts);
+
+    const sessionId = args.sessionId;
+    const chatId = args.chatId;
+
+    let assistantText = '';
+    const onDelta = (text: string) => {
+      assistantText += text;
+      this.bufferDelta(sessionId, chatId, text);
+    };
+    const onDone = (usage: TokenUsage) => {
+      this.flushBuffer(sessionId, chatId);
+      const updated: ConversationEntry[] = [
+        ...history,
+        { role: 'user',      content: userMessage,    timestamp: Date.now() },
+        { role: 'assistant', content: assistantText, timestamp: Date.now() },
+      ];
+      this.conversations.set(key, updated);
+      this.inflight.delete(chatId);
+      this.deps.panel.postChatDone(sessionId, chatId, usage);
+      // Clear drafts AFTER successful send. Failures leave the queue intact
+      // so the user can retry.
+      this.deps.orchestrator.clearRejectionDrafts(sessionId);
+      this.deps.logger.debug('chat', 'batch-feedback.done', {
+        sid: sessionId, chatId, drafts: drafts.length,
+      });
+    };
+    const onError = (err: ChatError) => {
+      this.flushBuffer(sessionId, chatId);
+      this.inflight.delete(chatId);
+      this.deps.panel.postChatError(sessionId, chatId, err);
+      this.deps.logger.warn('chat', 'batch-feedback.error', {
+        sid: sessionId, chatId, kind: err.kind,
+      });
+    };
 
     await this.deps.client.streamChat(
       { hunkDiff, history, userMessage },
@@ -273,6 +367,25 @@ export function composeUserMessageWithTranscript(
 
 function renderToolCallList(calls: ToolCallSummary[]): string {
   return calls.map((c) => `- ${c.toolName}: ${c.inputSummary}`).join('\n');
+}
+
+/**
+ * v0.4 (A5): compose the consolidated drafts-send prompt. Plain enumeration
+ * for v0.4 (L109 in plan); LLM-driven clustering deferred to v1.x.
+ */
+export function composeBatchFeedbackMessage(
+  drafts: ReadonlyArray<{ relPath: string; hunkIdx: number; reason: string }>,
+): string {
+  const lines: string[] = [];
+  lines.push(`I rejected ${drafts.length} hunk${drafts.length === 1 ? '' : 's'} in this turn. Please rework with these in mind:`);
+  lines.push('');
+  for (const d of drafts) {
+    // Single-line quoting; embedded newlines collapse to spaces so the bullet
+    // remains scannable. Multi-line reasons are uncommon in practice.
+    const oneLine = d.reason.replace(/\s+/g, ' ').trim();
+    lines.push(`• ${d.relPath} hunk ${d.hunkIdx + 1}: "${oneLine}"`);
+  }
+  return lines.join('\n');
 }
 
 /** Exported for tests. */

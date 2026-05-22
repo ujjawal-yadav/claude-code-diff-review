@@ -27,6 +27,18 @@ export interface ChatThread {
   error: { kind: string; message: string } | null;
 }
 
+/**
+ * v0.4 (A5): pending drafts queue mirror. The orchestrator is source-of-truth;
+ * the webview holds a local copy populated from `rejection-drafts` messages.
+ */
+export interface DraftEntry {
+  filePath: string;
+  relPath: string;
+  hunkIdx: number;
+  reason: string;
+  ts: number;
+}
+
 export interface UiState {
   session: SessionReview | null;
   viewType: 'split' | 'unified';
@@ -51,6 +63,39 @@ export interface UiState {
   /** v0.3: keyboard-shortcuts help overlay visibility. */
   helpVisible: boolean;
 
+  /**
+   * v0.4 (A4): which hunk (if any) is currently in inline-edit mode. Null
+   * when no hunk is being edited. Set via the `e` key binding or the
+   * "Edit" button on the hunk header.
+   */
+  editMode: { filePath: string; hunkIndex: number } | null;
+
+  /**
+   * v0.4 (A5): pending drafts queue. Replaced wholesale on every
+   * `rejection-drafts` message from the host.
+   */
+  drafts: DraftEntry[];
+
+  /** v0.4 (A5): which hunks are currently showing the inline "Add reason"
+   *  textarea. Keyed by `${filePath}::${hunkIndex}`. */
+  reasonInputOpen: Record<string, boolean>;
+
+  /** v0.4 (A5): drafts section in ChatOverlay collapsed/expanded. */
+  draftsExpanded: boolean;
+
+  /**
+   * v0.4 (A8 cheap): which rename-group panels are expanded on which hunks.
+   * Keyed by `${filePath}::${hunkIndex}` (the hunk whose chip the user
+   * clicked). Each entry shows the inline group panel below that hunk.
+   */
+  renameGroupOpen: Record<string, boolean>;
+
+  /** v0.4: show-flagged-only filter (Wave 4). Persisted to memento. */
+  showFlaggedOnly: boolean;
+
+  /** v0.4: wrap-long-lines toggle (Wave 4). Persisted to memento. */
+  wrapLines: boolean;
+
   // mutations
   setSession(session: SessionReview, viewType: 'split' | 'unified'): void;
   setViewType(v: 'split' | 'unified'): void;
@@ -70,6 +115,21 @@ export interface UiState {
   // v0.3 — keyboard help overlay
   setHelpVisible(v: boolean): void;
   toggleHelpVisible(): void;
+
+  // v0.4 (A4) — edit mode
+  setEditMode(target: { filePath: string; hunkIndex: number } | null): void;
+
+  // v0.4 (A5) — drafts queue + reason input
+  setDrafts(drafts: DraftEntry[]): void;
+  toggleReasonInput(filePath: string, hunkIndex: number, open?: boolean): void;
+  setDraftsExpanded(v: boolean): void;
+
+  // v0.4 (A8) — rename group panel toggle
+  toggleRenameGroupPanel(filePath: string, hunkIndex: number, open?: boolean): void;
+
+  // v0.4 (Wave 4) — view filters
+  setShowFlaggedOnly(v: boolean): void;
+  setWrapLines(v: boolean): void;
 
   // chat
   openChat(filePath: string, hunkIndex: number): void;
@@ -94,10 +154,15 @@ interface PersistedState {
   sidebarWidth?: number;
   headerHeight?: number;
   viewType?: 'split' | 'unified';
+  /** v0.4 (Wave 4): persisted filter preferences. */
+  showFlaggedOnly?: boolean;
+  wrapLines?: boolean;
 }
 const persisted = getPersistedState<PersistedState>() ?? {};
 const initialSidebarWidth = clamp(persisted.sidebarWidth ?? SIDEBAR_DEFAULT, SIDEBAR_MIN, SIDEBAR_MAX);
 const initialHeaderHeight = clamp(persisted.headerHeight ?? HEADER_DEFAULT, HEADER_MIN, HEADER_MAX);
+const initialShowFlaggedOnly = persisted.showFlaggedOnly ?? false;
+const initialWrapLines       = persisted.wrapLines       ?? false;
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
@@ -115,6 +180,13 @@ export const useUi = create<UiState>((set, get) => ({
   headerHeight: initialHeaderHeight,
   undoDepth: 0,
   helpVisible: false,
+  editMode: null,
+  drafts: [],
+  reasonInputOpen: {},
+  draftsExpanded: false,
+  renameGroupOpen: {},
+  showFlaggedOnly: initialShowFlaggedOnly,
+  wrapLines: initialWrapLines,
 
   setSession(session, viewType) {
     const expanded: Record<string, boolean> = {};
@@ -214,6 +286,60 @@ export const useUi = create<UiState>((set, get) => ({
 
   toggleHelpVisible() {
     set((s) => ({ helpVisible: !s.helpVisible }));
+  },
+
+  // -- v0.4 (A4) ----------------------------------------------------------
+
+  setEditMode(target) {
+    set({ editMode: target });
+  },
+
+  // -- v0.4 (A5) ----------------------------------------------------------
+
+  setDrafts(drafts) {
+    set({ drafts });
+  },
+
+  toggleReasonInput(filePath, hunkIndex, open) {
+    const key = `${filePath}::${hunkIndex}`;
+    set((s) => {
+      const wasOpen = !!s.reasonInputOpen[key];
+      const next = open === undefined ? !wasOpen : open;
+      const map = { ...s.reasonInputOpen };
+      if (next) map[key] = true;
+      else delete map[key];
+      return { reasonInputOpen: map };
+    });
+  },
+
+  setDraftsExpanded(v) {
+    set({ draftsExpanded: v });
+  },
+
+  // -- v0.4 (A8 cheap) ----------------------------------------------------
+
+  toggleRenameGroupPanel(filePath, hunkIndex, open) {
+    const key = `${filePath}::${hunkIndex}`;
+    set((s) => {
+      const wasOpen = !!s.renameGroupOpen[key];
+      const next = open === undefined ? !wasOpen : open;
+      const map = { ...s.renameGroupOpen };
+      if (next) map[key] = true;
+      else delete map[key];
+      return { renameGroupOpen: map };
+    });
+  },
+
+  // -- v0.4 (Wave 4) -----------------------------------------------------
+
+  setShowFlaggedOnly(v) {
+    set({ showFlaggedOnly: v });
+    setPersistedState({ ...(getPersistedState<PersistedState>() ?? {}), showFlaggedOnly: v });
+  },
+
+  setWrapLines(v) {
+    set({ wrapLines: v });
+    setPersistedState({ ...(getPersistedState<PersistedState>() ?? {}), wrapLines: v });
   },
 
   // -- chat ---------------------------------------------------------------

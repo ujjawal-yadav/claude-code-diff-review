@@ -31,6 +31,7 @@ export function App(): JSX.Element {
   const sidebarWidth = useUi((s) => s.sidebarWidth);
   const headerHeight = useUi((s) => s.headerHeight);
   const setUndoDepth = useUi((s) => s.setUndoDepth);
+  const setDrafts    = useUi((s) => s.setDrafts);
 
   useEffect(() => {
     function onMessage(ev: MessageEvent) {
@@ -58,6 +59,10 @@ export function App(): JSX.Element {
         case 'undo-stack-changed':
           setUndoDepth(msg.depth);
           break;
+        case 'rejection-drafts':
+          // v0.4 (A5): wholesale replace the local drafts mirror.
+          setDrafts(msg.drafts);
+          break;
         case 'set-conflict-warning':
           pushToast({
             level: 'warn',
@@ -83,7 +88,7 @@ export function App(): JSX.Element {
     window.addEventListener('message', onMessage);
     send({ type: 'ready' });
     return () => window.removeEventListener('message', onMessage);
-  }, [setSession, applyHunk, applyFileUpdate, applySessionCompleted, setViewType, pushToast, appendStreamingDelta, finaliseStreaming, setChatError, setUndoDepth]);
+  }, [setSession, applyHunk, applyFileUpdate, applySessionCompleted, setViewType, pushToast, appendStreamingDelta, finaliseStreaming, setChatError, setUndoDepth, setDrafts]);
 
   // v0.3 — global keyboard handler for hunk navigation + actions.
   // The handler reads live state via `useUi.getState()` so the listener
@@ -174,6 +179,19 @@ export function App(): JSX.Element {
             const hunk = file?.hunks[selectedHunk];
             if (file && hunk && hunk.status === 'pending') {
               send({ type: 'reject-hunk', filePath: selectedFile, hunkIndex: selectedHunk });
+            }
+          }
+          ev.preventDefault();
+          break;
+        }
+        case 'e': {
+          // v0.4 (A4): enter edit mode on the selected hunk. Only pending
+          // hunks are editable (L6 — eligibility constraint).
+          if (selectedFile != null && selectedHunk != null) {
+            const file = sess.files.find((f) => f.filePath === selectedFile);
+            const hunk = file?.hunks[selectedHunk];
+            if (file && hunk && hunk.status === 'pending') {
+              state.setEditMode({ filePath: selectedFile, hunkIndex: selectedHunk });
             }
           }
           ev.preventDefault();

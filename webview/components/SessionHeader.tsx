@@ -14,6 +14,10 @@ export function SessionHeader({ session, viewType, banner }: Props): JSX.Element
   const decided = session.metrics.acceptedHunks + session.metrics.rejectedHunks;
   const undoDepth = useUi((s) => s.undoDepth);
   const toggleHelp = useUi((s) => s.toggleHelpVisible);
+  const showFlaggedOnly = useUi((s) => s.showFlaggedOnly);
+  const setShowFlaggedOnly = useUi((s) => s.setShowFlaggedOnly);
+  const wrapLines = useUi((s) => s.wrapLines);
+  const setWrapLines = useUi((s) => s.setWrapLines);
   // v0.3: count hunks that carry at least one risk flag — surfaces as a
   // prioritisation hint in the header meta row.
   const flaggedCount = session.files.reduce(
@@ -43,6 +47,24 @@ export function SessionHeader({ session, viewType, banner }: Props): JSX.Element
       {banner ? <p className={styles.banner}>{banner}</p> : null}
       <div className={styles.actions}>
         <ToggleViewType current={viewType} />
+        {/* v0.4 (Wave 4): show-flagged-only filter (file-level; L3). */}
+        <button
+          className={styles.toggle}
+          onClick={() => setShowFlaggedOnly(!showFlaggedOnly)}
+          aria-pressed={showFlaggedOnly}
+          title={showFlaggedOnly ? 'Show all files' : 'Show only flagged files'}
+        >
+          🏷 {showFlaggedOnly ? 'All files' : 'Flagged only'}
+        </button>
+        {/* v0.4 (Wave 4): wrap-long-lines toggle. */}
+        <button
+          className={styles.toggle}
+          onClick={() => setWrapLines(!wrapLines)}
+          aria-pressed={wrapLines}
+          title={wrapLines ? 'Stop wrapping long lines' : 'Wrap long lines instead of clipping'}
+        >
+          ⏎ {wrapLines ? 'Wrap on' : 'Wrap off'}
+        </button>
         <button
           className={styles.bulk}
           onClick={() => send({ type: 'accept-all' })}

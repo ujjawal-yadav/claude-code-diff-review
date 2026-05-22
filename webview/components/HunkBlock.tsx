@@ -1,9 +1,27 @@
 import { useEffect, useRef } from 'react';
-import type { HunkReview } from '../../src/types';
+import type { HunkReview, SessionReview } from '../../src/types';
 import { useUi } from '../store';
 import { send } from '../vscode';
 import { FlagBadges } from './FlagChip';
+import { InlineExpandingPanel } from './InlineExpandingPanel';
 import styles from '../styles/HunkBlock.module.css';
+
+const EDIT_BYTES_CAP   = 256 * 1024;
+const REASON_BYTES_CAP = 4 * 1024;
+
+/** Pure helper: extract the hunk's after view (context + `+` lines) as
+ *  plain text, prefixes stripped. Mirrors src/reviewOrchestrator.ts
+ *  `extractHunkAfterView`. Kept inline to avoid host→webview import. */
+function extractAfterView(hunk: HunkReview): string {
+  const out: string[] = [];
+  for (const line of hunk.lines) {
+    const tag = line.charAt(0);
+    if (tag === '+' || tag === ' ') {
+      out.push(line.slice(1));
+    }
+  }
+  return out.join('\n');
+}
 
 interface Props {
   filePath: string;
@@ -17,6 +35,12 @@ interface Props {
    * hunk-level, so all hunks of a file share the same attribution.
    */
   subagentId?: string;
+  /**
+   * v0.4 (A8 cheap): full session, threaded down so the rename-group
+   * panel can resolve `renameGroups[groupId]` → member list. Optional
+   * to keep older test harnesses building; falls back to no group panel.
+   */
+  session?: SessionReview;
 }
 
 /**
@@ -30,10 +54,23 @@ interface Props {
  * full keyboard control, predictable accessibility, no library version drift.
  * The `viewType` prop is wired so a future swap is local to this component.
  */
-export function HunkBlock({ filePath, hunk, viewType, selected, onSelect, subagentId }: Props): JSX.Element {
+export function HunkBlock({ filePath, hunk, viewType, selected, onSelect, subagentId, session }: Props): JSX.Element {
   const decided = hunk.status !== 'pending';
   const openChat = useUi((s) => s.openChat);
-  const cls = [styles.root, selected ? styles.selected : '', styles[`status_${hunk.status}`] ?? ''].filter(Boolean).join(' ');
+  const editMode = useUi((s) => s.editMode);
+  const setEditMode = useUi((s) => s.setEditMode);
+  const reasonInputOpen = useUi((s) => s.reasonInputOpen);
+  const toggleReasonInput = useUi((s) => s.toggleReasonInput);
+  const renameGroupOpen = useUi((s) => s.renameGroupOpen);
+  const toggleRenameGroupPanel = useUi((s) => s.toggleRenameGroupPanel);
+  const wrapLines = useUi((s) => s.wrapLines);
+
+  const isEditing = editMode?.filePath === filePath && editMode?.hunkIndex === hunk.index;
+  const reasonKey = `${filePath}::${hunk.index}`;
+  const isReasonOpen = !!reasonInputOpen[reasonKey];
+  const isGroupPanelOpen = !!renameGroupOpen[reasonKey];
+
+  const cls = [styles.root, selected ? styles.selected : '', styles[`status_${hunk.status}`] ?? '', wrapLines ? styles.wrap : ''].filter(Boolean).join(' ');
 
   // v0.3 — when keyboard navigation selects this hunk, scroll it into view.
   // `block: 'nearest'` minimises scroll movement (only when out of viewport),
@@ -59,6 +96,18 @@ export function HunkBlock({ filePath, hunk, viewType, selected, onSelect, subage
         <code id={`hunk-header-${hunk.index}`} className={styles.hunkHeader}>{hunk.header}</code>
         {/* v0.3: per-hunk risk flag badges (deletion, large-hunk, removed-error-handling, etc.) */}
         <FlagBadges flags={hunk.flags} />
+        {/* v0.4 (A8 cheap): rename-group chip. Click to expand the inline group panel. */}
+        {hunk.renameGroupId && session?.renameGroups?.[hunk.renameGroupId] && (
+          <button
+            type="button"
+            className={styles.renameChip}
+            onClick={(ev) => { ev.stopPropagation(); toggleRenameGroupPanel(filePath, hunk.index); }}
+            title={`Rename group: ${hunk.renameGroupId}`}
+            aria-label={`Toggle rename group panel for ${hunk.renameGroupId}`}
+          >
+            ↻ rename · {Math.max(0, (session.renameGroups[hunk.renameGroupId]?.length ?? 1) - 1)} more
+          </button>
+        )}
         <div className={styles.actions} role="group" aria-label="Hunk actions">
           <button
             type="button"
@@ -78,6 +127,19 @@ export function HunkBlock({ filePath, hunk, viewType, selected, onSelect, subage
           >
             ✗ Reject
           </button>
+          {/* v0.4 (A4): Edit button — pending only (L6). Pressing the keyboard
+              shortcut `e` while this hunk is selected has the same effect. */}
+          {!decided && (
+            <button
+              type="button"
+              className={`${styles.btn} ${styles.btnEdit}`}
+              onClick={() => setEditMode({ filePath, hunkIndex: hunk.index })}
+              aria-label={`Edit hunk ${hunk.index + 1}`}
+              title="Edit in place (e)"
+            >
+              ✎ Edit
+            </button>
+          )}
           {decided && (
             <button
               type="button"
@@ -87,6 +149,19 @@ export function HunkBlock({ filePath, hunk, viewType, selected, onSelect, subage
               title="Undo this decision (within-turn)"
             >
               ↶ Undo
+            </button>
+          )}
+          {/* v0.4 (A5): on rejected hunks, offer "Add reason" so the user can
+              attach a reason that funnels into the drafts queue. */}
+          {hunk.status === 'rejected' && (
+            <button
+              type="button"
+              className={`${styles.btn} ${styles.btnChat}`}
+              onClick={() => toggleReasonInput(filePath, hunk.index)}
+              aria-label={`Add rejection reason for hunk ${hunk.index + 1}`}
+              title="Add reason"
+            >
+              💬 Add reason
             </button>
           )}
           <button
@@ -101,7 +176,97 @@ export function HunkBlock({ filePath, hunk, viewType, selected, onSelect, subage
         </div>
       </header>
       {viewType === 'split' ? <SplitView hunk={hunk} /> : <UnifiedView hunk={hunk} />}
+
+      {/* v0.4 (A4): inline edit textarea, mounted when this hunk is in edit mode. */}
+      {isEditing && hunk.status === 'pending' && (
+        <InlineExpandingPanel
+          mode="edit"
+          initialValue={extractAfterView(hunk)}
+          maxBytes={EDIT_BYTES_CAP}
+          placeholder="Edit the after-content of this hunk and click Save."
+          saveLabel="Save edit"
+          onCancel={() => setEditMode(null)}
+          onSave={(value) => {
+            send({ type: 'save-hunk-edit', filePath, hunkIndex: hunk.index, editedAfter: value });
+            setEditMode(null);
+          }}
+        />
+      )}
+
+      {/* v0.4 (A5): inline reason textarea, mounted when "Add reason" is clicked. */}
+      {isReasonOpen && hunk.status === 'rejected' && (
+        <InlineExpandingPanel
+          mode="reason"
+          maxBytes={REASON_BYTES_CAP}
+          placeholder="Why did you reject this hunk?"
+          saveLabel="Save to drafts"
+          onCancel={() => toggleReasonInput(filePath, hunk.index, false)}
+          onSave={(value) => {
+            send({ type: 'add-rejection-reason', filePath, hunkIndex: hunk.index, reason: value });
+            toggleReasonInput(filePath, hunk.index, false);
+          }}
+        />
+      )}
+
+      {/* v0.4 (A8 cheap): inline rename-group panel. */}
+      {isGroupPanelOpen && hunk.renameGroupId && session?.renameGroups?.[hunk.renameGroupId] && (
+        <InlineExpandingPanel
+          mode="info"
+          onCancel={() => toggleRenameGroupPanel(filePath, hunk.index, false)}
+        >
+          <RenameGroupPanel
+            groupId={hunk.renameGroupId}
+            members={session.renameGroups[hunk.renameGroupId]!}
+            onClose={() => toggleRenameGroupPanel(filePath, hunk.index, false)}
+          />
+        </InlineExpandingPanel>
+      )}
     </section>
+  );
+}
+
+function RenameGroupPanel({
+  groupId,
+  members,
+  onClose,
+}: {
+  groupId: string;
+  members: ReadonlyArray<{ filePath: string; hunkIndex: number }>;
+  onClose(): void;
+}): JSX.Element {
+  const [oldTok, newTok] = groupId.split('->');
+  return (
+    <div className={styles.renameGroupPanel}>
+      <div className={styles.renameGroupHeader}>
+        <strong>{oldTok}</strong> → <strong>{newTok}</strong> across {members.length} hunks
+      </div>
+      <ul className={styles.renameGroupList}>
+        {members.map((m) => (
+          <li key={`${m.filePath}::${m.hunkIndex}`}>
+            <code>{m.filePath}</code> · hunk {m.hunkIndex + 1}
+          </li>
+        ))}
+      </ul>
+      <div className={styles.renameGroupActions}>
+        <button
+          type="button"
+          className={styles.renameGroupAccept}
+          onClick={() => { send({ type: 'decide-rename-group', groupId, action: 'accept' }); onClose(); }}
+        >
+          ✓ Accept all ({members.length})
+        </button>
+        <button
+          type="button"
+          className={styles.renameGroupReject}
+          onClick={() => { send({ type: 'decide-rename-group', groupId, action: 'reject' }); onClose(); }}
+        >
+          ✗ Reject all ({members.length})
+        </button>
+        <button type="button" className={styles.renameGroupCancel} onClick={onClose}>
+          Close
+        </button>
+      </div>
+    </div>
   );
 }
 

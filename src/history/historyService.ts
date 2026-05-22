@@ -63,6 +63,8 @@ export type HistoryChangeKind =
   | 'turn-started'
   | 'turn-stopped'
   | 'hunk-decided'
+  | 'hunk-edited'
+  | 'rejection-reason'
   | 'snapshot-reverted'
   | 'undo'
   | 'turn-aborted'
@@ -134,6 +136,52 @@ export interface RecordFileSnapshotRevertedInput {
   subagentId?: string;
   relPath: string;
   postContent: string;
+}
+
+/**
+ * v0.4 (A4 — edit-before-accept): persist a per-hunk edit override.
+ *
+ * `editedAfter` is the raw user-edited `+` block content (no diff prefixes);
+ * `postContent` is the file's on-disk content after the edit landed.
+ * `oldHunk` / `newHunk` capture the structural before/after so reconstruction
+ * can re-seed `editedHunks` without re-deriving from text diffs.
+ */
+export interface RecordHunkEditedInput {
+  sessionId: string;
+  turnId: string;
+  agentId: AgentId;
+  subagentId?: string;
+  relPath: string;
+  hunkIdx: number;
+  /** Raw text of the edited `+` block (no leading `+`). */
+  editedAfter: string;
+  /** File content after the edit landed on disk. */
+  postContent: string;
+  oldHunk: {
+    oldStart: number; oldLines: number;
+    newStart: number; newLines: number;
+    lines: string[];
+  };
+  newHunk: {
+    oldStart: number; oldLines: number;
+    newStart: number; newLines: number;
+    lines: string[];
+  };
+}
+
+/**
+ * v0.4 (A5 — reject-with-feedback): persist a user-typed rejection reason.
+ * Stored as a blob so multi-paragraph reasons don't bloat the JSONL file.
+ */
+export interface RecordRejectionReasonInput {
+  sessionId: string;
+  turnId: string;
+  agentId: AgentId;
+  subagentId?: string;
+  relPath: string;
+  hunkIdx: number;
+  /** User-typed reason text (capped 4 KB at the caller). */
+  reason: string;
 }
 
 /**
@@ -348,6 +396,68 @@ export class HistoryService {
   }
 
   /**
+   * v0.4 (A4 — edit-before-accept): persist a user's in-place edit of a hunk.
+   *
+   * Writes two blobs (the raw edited `+` content and the post-edit file
+   * content) so reconstruction can re-seed `editedHunks` AND re-anchor
+   * `afterContent` without re-running the patch pipeline.
+   *
+   * Fire-and-forget; the user-flow never blocks on the audit write.
+   */
+  async recordHunkEdited(input: RecordHunkEditedInput): Promise<void> {
+    if (!this.opts.enabled) return;
+    try {
+      const writer = this.getWriter(input.sessionId);
+      const editedAfterBlob = await this.blobs.write(input.editedAfter);
+      const postBlob        = await this.blobs.write(input.postContent);
+      await writer.append({
+        kind: 'hunk-edited',
+        ts: Date.now(),
+        turnId: input.turnId,
+        agentId: input.agentId,
+        ...(input.subagentId ? { subagentId: input.subagentId } : {}),
+        path: input.relPath,
+        hunkIdx: input.hunkIdx,
+        editedAfterBlob,
+        postBlob,
+        oldHunk: input.oldHunk,
+        newHunk: input.newHunk,
+      });
+      await this.invalidatePendingHunkCount(input.sessionId);
+      this.emitChange({ sessionId: input.sessionId, kind: 'hunk-edited' });
+    } catch (err) {
+      this.opts.logger.warn('history', 'edit.failed', { err: String(err), sid: input.sessionId });
+    }
+  }
+
+  /**
+   * v0.4 (A5 — reject-with-feedback): persist a user-typed rejection reason.
+   *
+   * Reason text → blob store → SHA reference on the event. Aggregated by the
+   * orchestrator into a drafts queue surfaced in the ChatOverlay drafts panel.
+   */
+  async recordRejectionReason(input: RecordRejectionReasonInput): Promise<void> {
+    if (!this.opts.enabled) return;
+    try {
+      const writer = this.getWriter(input.sessionId);
+      const reasonBlob = await this.blobs.write(input.reason);
+      await writer.append({
+        kind: 'rejection-reason',
+        ts: Date.now(),
+        turnId: input.turnId,
+        agentId: input.agentId,
+        ...(input.subagentId ? { subagentId: input.subagentId } : {}),
+        path: input.relPath,
+        hunkIdx: input.hunkIdx,
+        reasonBlob,
+      });
+      this.emitChange({ sessionId: input.sessionId, kind: 'rejection-reason' });
+    } catch (err) {
+      this.opts.logger.warn('history', 'rejection-reason.failed', { err: String(err), sid: input.sessionId });
+    }
+  }
+
+  /**
    * Phase β.0 (FR-B0.7): emit an `undo` event for an in-session undo path.
    *
    * Fire-and-forget pattern — failures are logged but never block the user
@@ -488,6 +598,15 @@ export class HistoryService {
       subagentId?: string;
       hunks: ReconstructedFileReview['hunks'];
       acceptedSet: Set<number>;
+      /**
+       * v0.4 (A4): per-hunk edit overrides keyed by hunk index. Reconstructed
+       * from `hunk-edited` events; surfaced on `ReconstructedSessionReview.hunkSets`.
+       */
+      editedHunks: Map<number, {
+        oldStart: number; oldLines: number;
+        newStart: number; newLines: number;
+        lines: string[];
+      }>;
     }
     const files = new Map<string, PerFileState>();
     let agentId: AgentId = 'claude-code';
@@ -495,6 +614,8 @@ export class HistoryService {
     let lastEventId = -1;
     let lastEventAt = 0;
     let hadAnyEvent = false;
+    /** v0.4 (A5): drafts queue rebuilt in chronological event order. */
+    const rejectionReasons: ReconstructedSessionReview['rejectionReasons'] = [];
 
     for await (const ev of this.reader.readSession(sessionId)) {
       hadAnyEvent = true;
@@ -522,6 +643,7 @@ export class HistoryService {
               isBinary: false,
               hunks: [],
               acceptedSet: new Set<number>(),
+              editedHunks: new Map(),
             };
             // Subsequent turn-started for the same file (multi-turn session)
             // replaces the snapshot baseline. Hunks/acceptedSet reset later
@@ -550,11 +672,15 @@ export class HistoryService {
               isBinary: false,
               hunks: [],
               acceptedSet: new Set<number>(),
+              editedHunks: new Map(),
             };
             state.afterContent = after;
             state.isNew = f.isNew;
             state.isDeleted = f.isDeleted;
             state.isBinary = f.isBinary;
+            // v0.4: a fresh turn-stopped resets edit overrides (Claude wrote
+            // new bytes; prior in-place edits no longer apply to this turn).
+            state.editedHunks = new Map();
             // M9.6: preserve per-file sub-agent attribution across replay.
             if (f.subagentId) state.subagentId = f.subagentId;
             state.hunks = f.hunks.map((h) => ({
@@ -643,6 +769,57 @@ export class HistoryService {
         case 'turn-aborted':
           // Note the abort but keep replaying — a session can recover.
           break;
+        case 'hunk-edited': {
+          // v0.4 (A4): re-seed the per-hunk substitution + flip status to
+          // 'edited'. The newHunk is captured directly on the event (no
+          // blob read needed for structure); afterContent re-anchors from
+          // the postBlob so following events compose against the correct
+          // base.
+          const state = files.get(ev.path);
+          if (!state) break;
+          state.editedHunks.set(ev.hunkIdx, {
+            oldStart: ev.newHunk.oldStart,
+            oldLines: ev.newHunk.oldLines,
+            newStart: ev.newHunk.newStart,
+            newLines: ev.newHunk.newLines,
+            lines: ev.newHunk.lines.slice(),
+          });
+          state.acceptedSet.add(ev.hunkIdx);
+          const hunk = state.hunks.find((h) => h.index === ev.hunkIdx);
+          if (hunk) {
+            hunk.status = 'edited';
+            hunk.decidedAt = ev.ts;
+            // Also reflect substituted shape so the webview-rendered diff
+            // visually matches the on-disk edit.
+            hunk.newStart = ev.newHunk.newStart;
+            hunk.newLines = ev.newHunk.newLines;
+            hunk.lines = ev.newHunk.lines.slice();
+          }
+          if (ev.postBlob) {
+            state.afterContent = await this.safeReadBlob(ev.postBlob);
+          }
+          break;
+        }
+        case 'rejection-reason': {
+          // v0.4 (A5): drafts queue replay. Resolve path from cwd at
+          // surface-time (caller passes the cwd through). Reason blob read
+          // is intentional — we want the live text for the drafts UI.
+          try {
+            const reason = await this.safeReadBlob(ev.reasonBlob);
+            rejectionReasons.push({
+              filePath: ev.path, // absolute resolved later via joinCwd
+              relPath: ev.path,
+              hunkIdx: ev.hunkIdx,
+              reason,
+              ts: ev.ts,
+            });
+          } catch (err) {
+            this.opts.logger.debug('history', 'rejection-reason.read.failed', {
+              err: String(err), sha: ev.reasonBlob,
+            });
+          }
+          break;
+        }
       }
     }
 
@@ -702,6 +879,31 @@ export class HistoryService {
           lines: h.lines.slice(),
         })),
         acceptedSet: Array.from(state.acceptedSet).sort((a, b) => a - b),
+        // v0.4 (A4): surface per-hunk edit overrides for adoption.
+        editedHunks: Array.from(state.editedHunks.entries()).map(([index, h]) => ({
+          index,
+          oldStart: h.oldStart,
+          oldLines: h.oldLines,
+          newStart: h.newStart,
+          newLines: h.newLines,
+          header: '',
+          lines: h.lines.slice(),
+        })),
+      });
+    }
+
+    // v0.4 (A5): resolve rejection-reason filePaths (currently absolute-tbd
+    // via joinCwd). Filter out entries whose path escapes the workspace.
+    const resolvedReasons: ReconstructedSessionReview['rejectionReasons'] = [];
+    for (const r of rejectionReasons) {
+      const filePath = this.joinCwd(cwd, r.relPath);
+      if (filePath === null) continue;
+      resolvedReasons.push({
+        filePath,
+        relPath: r.relPath,
+        hunkIdx: r.hunkIdx,
+        reason: r.reason,
+        ts: r.ts,
       });
     }
 
@@ -715,6 +917,7 @@ export class HistoryService {
       files: reconstructedFiles,
       hunkSets,
       driftPerFile,
+      rejectionReasons: resolvedReasons,
     };
   }
 

@@ -18,6 +18,9 @@ export function DiffPane({ file }: Props): JSX.Element {
   const toggle   = useUi((s) => s.toggleExpanded);
   const selectedHunk = useUi((s) => s.selectedHunk);
   const selectHunk   = useUi((s) => s.selectHunk);
+  // v0.4 (A8 cheap): thread session down so HunkBlock can resolve the
+  // rename-group panel's member list. Optional in the HunkBlock API.
+  const session  = useUi((s) => s.session);
 
   if (file.isBinary) {
     return (
@@ -87,6 +90,7 @@ export function DiffPane({ file }: Props): JSX.Element {
               selected={selectedHunk === h.index}
               onSelect={selectHunk}
               {...(file.subagentId ? { subagentId: file.subagentId } : {})}
+              {...(session ? { session } : {})}
             />
           ))}
         </div>

@@ -106,13 +106,59 @@ export interface TurnAbortedEvent extends BaseEvent {
   reason: 'window-closed' | 'extension-deactivated' | 'circuit-breaker' | 'timeout';
 }
 
+/**
+ * v0.4 (A4 — edit-before-accept). Captures the user's in-place modification
+ * of a hunk's `+` block. `oldHunk` is Claude's original; `newHunk` is the
+ * post-edit version (same `oldStart`/`oldLines`; potentially different
+ * `newLines` + `lines`). `editedAfterBlob` SHA-256s just the edited `+`
+ * block content (raw text) so the Insights panel can later mine the
+ * difference between Claude's suggestion and the user's correction.
+ * `postBlob` SHA-256s disk content after the edit landed.
+ */
+export interface HunkEditedEvent extends BaseEvent {
+  kind: 'hunk-edited';
+  path: string;
+  hunkIdx: number;
+  /** SHA-256 of the user-edited `+` block content (no diff prefixes). */
+  editedAfterBlob: string;
+  /** SHA-256 of disk content after the edit landed. */
+  postBlob: string;
+  /** Claude's original hunk (oldStart/oldLines/newStart/newLines/lines). */
+  oldHunk: {
+    oldStart: number; oldLines: number;
+    newStart: number; newLines: number;
+    lines: string[];
+  };
+  /** Post-edit substituted hunk; oldStart/oldLines preserved. */
+  newHunk: {
+    oldStart: number; oldLines: number;
+    newStart: number; newLines: number;
+    lines: string[];
+  };
+}
+
+/**
+ * v0.4 (A5 — reject-with-feedback). User-typed reason attached to a previously
+ * rejected hunk. The reason text lives in the blob store (size discipline);
+ * the event references it via SHA-256.
+ */
+export interface RejectionReasonEvent extends BaseEvent {
+  kind: 'rejection-reason';
+  path: string;
+  hunkIdx: number;
+  /** SHA-256 of the reason text. */
+  reasonBlob: string;
+}
+
 export type HistoryEvent =
   | TurnStartedEvent
   | TurnStoppedEvent
   | HunkDecidedEvent
   | FileSnapshotRevertedEvent
   | UndoEvent
-  | TurnAbortedEvent;
+  | TurnAbortedEvent
+  | HunkEditedEvent
+  | RejectionReasonEvent;
 
 // --------------------------------------------------------------------------
 // Zod validators — used by the reader to tolerantly decode JSONL lines.
@@ -212,6 +258,33 @@ export const TurnAbortedEventZ = z.object({
   reason: z.enum(['window-closed', 'extension-deactivated', 'circuit-breaker', 'timeout']),
 });
 
+const HunkShapeZ = z.object({
+  oldStart: z.number().int().nonnegative(),
+  oldLines: z.number().int().nonnegative(),
+  newStart: z.number().int().nonnegative(),
+  newLines: z.number().int().nonnegative(),
+  lines: z.array(z.string()),
+});
+
+export const HunkEditedEventZ = z.object({
+  ...BaseFields,
+  kind: z.literal('hunk-edited'),
+  path: z.string(),
+  hunkIdx: z.number().int().nonnegative(),
+  editedAfterBlob: Sha256Like,
+  postBlob: Sha256Like,
+  oldHunk: HunkShapeZ,
+  newHunk: HunkShapeZ,
+});
+
+export const RejectionReasonEventZ = z.object({
+  ...BaseFields,
+  kind: z.literal('rejection-reason'),
+  path: z.string(),
+  hunkIdx: z.number().int().nonnegative(),
+  reasonBlob: Sha256Like,
+});
+
 export const HistoryEventZ = z.discriminatedUnion('kind', [
   TurnStartedEventZ,
   TurnStoppedEventZ,
@@ -219,6 +292,8 @@ export const HistoryEventZ = z.discriminatedUnion('kind', [
   FileSnapshotRevertedEventZ,
   UndoEventZ,
   TurnAbortedEventZ,
+  HunkEditedEventZ,
+  RejectionReasonEventZ,
 ]);
 
 /** Tolerant decode — returns null on schema failure (caller logs at debug). */
