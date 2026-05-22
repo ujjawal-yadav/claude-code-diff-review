@@ -124,6 +124,11 @@
           "default": true,
           "description": "Inject Claude Code's transcript context (the user's original prompt + Claude's surrounding tool calls) into hunk chat queries. Off → chat sees only the hunk diff. Transcript content is read host-side only and never forwarded to the webview."
         },
+        "claudeReview.riskFlags.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Surface heuristic-based risk flags on files and hunks (sensitive paths like .env / migrations / auth, pure deletions, removed error handling, removed null checks, large hunks, lockfiles, test files). Flags help prioritise which hunks to review most carefully — useful for sessions with 20+ edits. Off → no flag chips render."
+        },
         "claudeReview.port": {
           "type": "number",
           "default": 53117,

@@ -1,6 +1,8 @@
+import { useEffect, useRef } from 'react';
 import type { HunkReview } from '../../src/types';
 import { useUi } from '../store';
 import { send } from '../vscode';
+import { FlagBadges } from './FlagChip';
 import styles from '../styles/HunkBlock.module.css';
 
 interface Props {
@@ -33,8 +35,19 @@ export function HunkBlock({ filePath, hunk, viewType, selected, onSelect, subage
   const openChat = useUi((s) => s.openChat);
   const cls = [styles.root, selected ? styles.selected : '', styles[`status_${hunk.status}`] ?? ''].filter(Boolean).join(' ');
 
+  // v0.3 — when keyboard navigation selects this hunk, scroll it into view.
+  // `block: 'nearest'` minimises scroll movement (only when out of viewport),
+  // and the absence of `behavior: 'smooth'` keeps rapid j/k presses snappy.
+  const ref = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (selected && ref.current) {
+      ref.current.scrollIntoView({ block: 'nearest' });
+    }
+  }, [selected]);
+
   return (
     <section
+      ref={ref}
       className={cls}
       onMouseDown={() => onSelect(hunk.index)}
       aria-labelledby={`hunk-header-${hunk.index}`}
@@ -44,6 +57,8 @@ export function HunkBlock({ filePath, hunk, viewType, selected, onSelect, subage
         title={subagentId ? `Produced by Task: ${subagentId}` : undefined}
       >
         <code id={`hunk-header-${hunk.index}`} className={styles.hunkHeader}>{hunk.header}</code>
+        {/* v0.3: per-hunk risk flag badges (deletion, large-hunk, removed-error-handling, etc.) */}
+        <FlagBadges flags={hunk.flags} />
         <div className={styles.actions} role="group" aria-label="Hunk actions">
           <button
             type="button"
@@ -122,11 +137,17 @@ function SplitView({ hunk }: { hunk: HunkReview }): JSX.Element {
           <li key={i} className={styles.splitRow}>
             <pre className={`${styles.splitCell} ${styles[`cell_${row.left.kind}`]}`}>
               <span className={styles.gutter}>{row.left.kind === 'del' ? '-' : ' '}</span>
-              <span className={styles.lineText}>{row.left.text}</span>
+              {/* v0.3: `title` shows full content on hover — long lines clip
+                  silently now (no per-line scrollbars; see HunkBlock.module.css). */}
+              <span className={styles.lineText} title={row.left.text || undefined}>
+                {row.left.text}
+              </span>
             </pre>
             <pre className={`${styles.splitCell} ${styles[`cell_${row.right.kind}`]}`}>
               <span className={styles.gutter}>{row.right.kind === 'add' ? '+' : ' '}</span>
-              <span className={styles.lineText}>{row.right.text}</span>
+              <span className={styles.lineText} title={row.right.text || undefined}>
+                {row.right.text}
+              </span>
             </pre>
           </li>
         ))}

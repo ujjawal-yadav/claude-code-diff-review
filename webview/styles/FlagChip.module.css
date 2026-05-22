@@ -1,0 +1,55 @@
+/* v0.3 — shared styling for risk-flag chips + hunk badges. */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 14px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  user-select: none;
+  cursor: help;
+}
+
+.badges {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 6px;
+  flex-wrap: wrap;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  font-size: 9px;
+  line-height: 13px;
+  border-radius: 2px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  user-select: none;
+  cursor: help;
+}
+
+/* Severity tiers — map to VS Code theme tokens so they read correctly in
+   light + dark themes without our own colour palette. */
+
+.sev_high {
+  background: var(--vscode-inputValidation-errorBackground, rgba(255, 64, 64, 0.15));
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground, #f14c4c));
+  color: var(--vscode-inputValidation-errorForeground, var(--vscode-errorForeground, #f14c4c));
+}
+
+.sev_warn {
+  background: var(--vscode-inputValidation-warningBackground, rgba(255, 200, 0, 0.12));
+  border-color: var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground, #c4a000));
+  color: var(--vscode-editorWarning-foreground, #c4a000);
+}
+
+.sev_info {
+  background: var(--vscode-inputValidation-infoBackground, rgba(100, 150, 255, 0.10));
+  border-color: var(--vscode-inputValidation-infoBorder, var(--vscode-editorInfo-foreground, #0078d4));
+  color: var(--vscode-editorInfo-foreground, var(--vscode-descriptionForeground));
+}

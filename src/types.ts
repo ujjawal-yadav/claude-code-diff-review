@@ -134,6 +134,22 @@ export type FileWarning =
    */
   | 'vanished';
 
+/**
+ * v0.3 — heuristic risk flags surfaced on files and hunks to help the user
+ * prioritise which hunks to review most carefully. File-level flags apply to
+ * the file as a whole (sensitive-path, lockfile, test-file). Hunk-level
+ * flags apply to a single hunk (deletion, large-hunk, removed-error-handling,
+ * removed-null-check). Heuristic implementation lives in `src/riskFlagger.ts`.
+ */
+export type RiskFlag =
+  | 'sensitive-path'
+  | 'deletion'
+  | 'removed-error-handling'
+  | 'removed-null-check'
+  | 'large-hunk'
+  | 'lockfile'
+  | 'test-file';
+
 export interface HunkReview {
   index: number;
   oldStart: number;
@@ -144,6 +160,12 @@ export interface HunkReview {
   lines: string[];
   status: HunkStatus;
   decidedAt?: number;
+  /**
+   * v0.3 — heuristic risk flags (deletion, large-hunk, removed-error-handling,
+   * removed-null-check). Computed by `flagHunk` in `src/riskFlagger.ts` at
+   * `openReview` time. Surfaced as inline badges on the hunk header.
+   */
+  flags?: RiskFlag[];
 }
 
 export interface FileReview {
@@ -168,6 +190,13 @@ export interface FileReview {
    * preserve attribution.
    */
   subagentId?: string;
+  /**
+   * v0.3 — heuristic risk flags applied to the file as a whole
+   * (sensitive-path, lockfile, test-file). Computed by `flagFile` in
+   * `src/riskFlagger.ts`. Surfaced as a single chip on the file-list row
+   * (most-severe flag wins; tooltip lists all).
+   */
+  flags?: RiskFlag[];
 }
 
 export interface SessionReview {

@@ -13,6 +13,13 @@ export function SessionHeader({ session, viewType, banner }: Props): JSX.Element
   const totalHunks = session.metrics.totalHunks;
   const decided = session.metrics.acceptedHunks + session.metrics.rejectedHunks;
   const undoDepth = useUi((s) => s.undoDepth);
+  const toggleHelp = useUi((s) => s.toggleHelpVisible);
+  // v0.3: count hunks that carry at least one risk flag — surfaces as a
+  // prioritisation hint in the header meta row.
+  const flaggedCount = session.files.reduce(
+    (acc, f) => acc + f.hunks.filter((h) => (h.flags?.length ?? 0) > 0).length,
+    0,
+  );
   return (
     <header className={styles.root} role="banner">
       <div className={styles.titleRow}>
@@ -20,6 +27,17 @@ export function SessionHeader({ session, viewType, banner }: Props): JSX.Element
         <span className={styles.meta}>
           Session {session.sessionId.slice(0, 7)} · {session.files.length} file
           {session.files.length === 1 ? '' : 's'} · {decided}/{totalHunks} hunks reviewed
+          {flaggedCount > 0 ? (
+            <>
+              {' · '}
+              <span
+                className={styles.flaggedSummary}
+                title="Hunks with risk flags (sensitive paths, deletions, removed error handling, etc.). Review these first."
+              >
+                {flaggedCount} flagged
+              </span>
+            </>
+          ) : null}
         </span>
       </div>
       {banner ? <p className={styles.banner}>{banner}</p> : null}
@@ -56,6 +74,15 @@ export function SessionHeader({ session, viewType, banner }: Props): JSX.Element
           title="Open History Panel — browse past sessions and resume/rollback/delete"
         >
           📜 History
+        </button>
+        {/* v0.3: discoverability entry to the keyboard shortcuts help overlay. */}
+        <button
+          className={styles.helpButton}
+          onClick={() => toggleHelp()}
+          aria-label="Show keyboard shortcuts"
+          title="Keyboard shortcuts (press ? to toggle)"
+        >
+          ⌨
         </button>
       </div>
     </header>

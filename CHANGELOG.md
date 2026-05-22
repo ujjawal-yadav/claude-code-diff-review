@@ -7,6 +7,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: Se
 
 _No unreleased changes yet._
 
+## [0.3.0] — 2026-05-22
+
+The first **decision-support** release. Prior releases optimised the mechanics of reviewing each hunk; v0.3 starts adding signal about which hunks are worth your attention in the first place. The headline additions are risk-flag triage on files and hunks, keyboard-driven review for rapid pass-through, and a fix for the per-line scrollbar mess in split view.
+
+### Added
+
+- **Risk flags** — heuristic triage surfaces in the review panel. Files get a chip in the left list; hunks get inline badges on the header; the session header shows an "N flagged" count. Categories:
+  - 🔴 **sensitive-path** — paths matching `.env`, `secrets`, `credentials`, `migrations`, `auth`, `crypto`, `cert`, `private-keys`, `access-tokens`
+  - ⚠ **removed-error-handling** — hunk removes `try`/`catch`/`throw`/`finally`/`raise`/`except`
+  - ⚠ **removed-null-check** — hunk removes `!= null` / `!== null` / `?.` / `??` / `isnil` / `is None`
+  - 🟡 **deletion** — pure-deletion hunk (no additions)
+  - 🟡 **large-hunk** — hunk changes more than 50 lines
+  - 🧪 **test-file** — test/spec file (lower risk than production)
+  - 🔒 **lockfile** — generated lockfile (`package-lock.json`, `yarn.lock`, `Cargo.lock`, …)
+  - Multiple flags compose; chip shows the most-severe one; tooltip lists all.
+  - Toggle via `claudeReview.riskFlags.enabled` (default `true`).
+
+- **Keyboard-driven review** — global keybindings for the review panel:
+  - `j` / `↓` next hunk · `k` / `↑` previous hunk
+  - `Shift+J` next flagged hunk · `Shift+K` previous flagged hunk
+  - `a` accept selected hunk · `r` reject selected hunk
+  - `?` open chat for selected hunk
+  - `Space` toggle expand/collapse selected file
+  - `Esc` close chat overlay / help overlay
+  - `Shift+/` (`?`) show keyboard shortcuts help overlay
+  - Selected hunk gets a visible outline and auto-scrolls into view.
+  - Help overlay also reachable via the new `⌨` button in the session header.
+  - Inputs (chat textarea) keep their keys — handler skips when focus is in an input/textarea/contenteditable.
+
+### Fixed
+
+- **Per-line horizontal scrollbars in split view** (UI). The `.splitCell` element was set to `overflow-x: auto`, producing a scrollbar under every line in the BEFORE | AFTER columns. Changed to `overflow: hidden`; long lines now clip silently and a native `title` tooltip on hover reveals the full text. A larger restructure (one scrollbar per hunk, or a wrap toggle) is queued for v0.4+.
+
+### Changed
+
+- `FileReview.flags` and `HunkReview.flags` are new optional fields on the core review types. Forward-compatible with the v0.2.x event log (the orchestrator never persists flags — they're recomputed at `openReview` time).
+
+### Tests
+
+- 51 new tests (31 for risk-flag heuristics covering each pattern + non-false-positive cases; 20 for keyboard-navigation arithmetic covering same-file, file-boundary spill, last-file edge, flagged-only filter, null-start cases). Total 409 / 409 passing.
+
 ## [0.2.2] — 2026-05-21
 
 A small patch that fixes a real-world dual-scope hook-config bug surfaced during E1 experiment work on 2026-05-21.

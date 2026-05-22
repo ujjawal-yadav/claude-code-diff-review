@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 import { computeDiff } from './diffEngine.js';
+import { flagFile, flagHunk } from './riskFlagger.js';
 import { initialHunkSetState, renderFileFromHunkSet } from './core/hunkSet.js';
 import type { HistoryService } from './history/historyService.js';
 import type { ReconstructedSessionReview } from './history/historyTypes.js';
@@ -104,6 +105,13 @@ export interface OrchestratorOptions {
    * the sub-agent task cache) so memory stays bounded.
    */
   onDismissSession?: (sessionId: string) => void;
+  /**
+   * v0.3: when true, run `flagFile` / `flagHunk` heuristics in `openReview`
+   * and attach `flags` to FileReview / HunkReview. Default behavior at
+   * orchestrator level is "off" (false) — extension.ts threads the user's
+   * `claudeReview.riskFlags.enabled` config in. Off means no chips render.
+   */
+  riskFlagsEnabled?: boolean;
 }
 
 export class ReviewOrchestrator {
@@ -793,6 +801,17 @@ export class ReviewOrchestrator {
       // M9.6: surface the sub-agent that produced this file's edit, if any.
       const subagentId = sessionData.subagentIdByPath.get(absPath);
       if (subagentId) fr.subagentId = subagentId;
+      // v0.3: risk-flag triage — heuristic decision support. Pure functions
+      // over the already-built FileReview/HunkReview shapes; no I/O. Gated
+      // on `riskFlagsEnabled` so users can opt out via config.
+      if (this.opts.riskFlagsEnabled) {
+        const fileFlags = flagFile(fr);
+        if (fileFlags.length > 0) fr.flags = fileFlags;
+        for (const h of fr.hunks) {
+          const hunkFlags = flagHunk(h);
+          if (hunkFlags.length > 0) h.flags = hunkFlags;
+        }
+      }
       files.push(fr);
     }
 

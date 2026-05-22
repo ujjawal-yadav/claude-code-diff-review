@@ -7,6 +7,8 @@ import { DiffPane } from './components/DiffPane';
 import { ChatOverlay } from './components/ChatOverlay';
 import { Splitter } from './components/Splitter';
 import { HeaderSplitter } from './components/HeaderSplitter';
+import { KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp';
+import { nextHunk, prevHunk, nextFlaggedHunk, prevFlaggedHunk } from './utils/keyboardNav';
 import type { HostToWebview } from '../src/messages';
 import styles from './styles/App.module.css';
 
@@ -83,6 +85,122 @@ export function App(): JSX.Element {
     return () => window.removeEventListener('message', onMessage);
   }, [setSession, applyHunk, applyFileUpdate, applySessionCompleted, setViewType, pushToast, appendStreamingDelta, finaliseStreaming, setChatError, setUndoDepth]);
 
+  // v0.3 — global keyboard handler for hunk navigation + actions.
+  // The handler reads live state via `useUi.getState()` so the listener
+  // doesn't need to re-bind on every state change. Filter prevents
+  // stealing keys from chat textarea / any other input.
+  useEffect(() => {
+    function onKey(ev: KeyboardEvent) {
+      const target = ev.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable) {
+          // Allow Esc to escape the chat textarea even when it has focus.
+          if (ev.key === 'Escape') {
+            const chat = useUi.getState().chat;
+            if (chat) useUi.getState().closeChat();
+          }
+          return;
+        }
+      }
+      const state = useUi.getState();
+
+      // Esc closes help overlay first, then chat.
+      if (ev.key === 'Escape') {
+        if (state.helpVisible) { state.setHelpVisible(false); ev.preventDefault(); return; }
+        if (state.chat) { state.closeChat(); ev.preventDefault(); return; }
+        return;
+      }
+
+      // Shift+/ (i.e. '?') toggles the help overlay regardless of selection.
+      if (ev.key === '?' && ev.shiftKey) {
+        state.toggleHelpVisible();
+        ev.preventDefault();
+        return;
+      }
+
+      // Don't process anything with modifier combos we don't recognise.
+      if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+
+      const sess = state.session;
+      if (!sess) return;
+
+      const selectedFile = state.selectedFile;
+      const selectedHunk = state.selectedHunk;
+
+      // Lowercase the key so `j`/`J`/`k`/`K` are consistent. Shift state
+      // tracked separately for the flagged-only variants.
+      const k = ev.key.toLowerCase();
+
+      switch (k) {
+        case 'j':
+        case 'arrowdown': {
+          const pos = ev.shiftKey
+            ? nextFlaggedHunk(sess, selectedFile, selectedHunk)
+            : nextHunk(sess, selectedFile, selectedHunk);
+          if (pos) {
+            state.selectFile(pos.filePath);
+            state.selectHunk(pos.hunkIndex);
+          }
+          ev.preventDefault();
+          break;
+        }
+        case 'k':
+        case 'arrowup': {
+          const pos = ev.shiftKey
+            ? prevFlaggedHunk(sess, selectedFile, selectedHunk)
+            : prevHunk(sess, selectedFile, selectedHunk);
+          if (pos) {
+            state.selectFile(pos.filePath);
+            state.selectHunk(pos.hunkIndex);
+          }
+          ev.preventDefault();
+          break;
+        }
+        case 'a': {
+          if (selectedFile != null && selectedHunk != null) {
+            const file = sess.files.find((f) => f.filePath === selectedFile);
+            const hunk = file?.hunks[selectedHunk];
+            if (file && hunk && hunk.status === 'pending') {
+              send({ type: 'accept-hunk', filePath: selectedFile, hunkIndex: selectedHunk });
+            }
+          }
+          ev.preventDefault();
+          break;
+        }
+        case 'r': {
+          if (selectedFile != null && selectedHunk != null) {
+            const file = sess.files.find((f) => f.filePath === selectedFile);
+            const hunk = file?.hunks[selectedHunk];
+            if (file && hunk && hunk.status === 'pending') {
+              send({ type: 'reject-hunk', filePath: selectedFile, hunkIndex: selectedHunk });
+            }
+          }
+          ev.preventDefault();
+          break;
+        }
+        case '?': {
+          // bare `?` (without shift, e.g. from a layout that maps ? directly):
+          // open chat on the selected hunk if one is selected.
+          if (selectedFile != null && selectedHunk != null) {
+            state.openChat(selectedFile, selectedHunk);
+            ev.preventDefault();
+          }
+          break;
+        }
+        case ' ': {
+          if (selectedFile != null) {
+            state.toggleExpanded(selectedFile);
+            ev.preventDefault();
+          }
+          break;
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []); // empty deps — uses getState() so the listener never re-binds
+
   if (!session) {
     return (
       <main className={styles.empty}>
@@ -125,6 +243,8 @@ export function App(): JSX.Element {
       {chat && chatHunk ? (
         <ChatOverlay filePath={chat.filePath} hunk={chatHunk} onClose={closeChat} />
       ) : null}
+      {/* v0.3 — keyboard shortcuts help overlay (toggled via `?` / Shift+/) */}
+      <KeyboardShortcutsHelp />
     </main>
   );
 }

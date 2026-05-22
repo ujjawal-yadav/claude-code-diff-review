@@ -40,7 +40,8 @@
 
 .toggle,
 .bulk,
-.historyButton {
+.historyButton,
+.helpButton {
   cursor: pointer;
   padding: 4px 10px;
   border: 1px solid var(--vscode-button-border, transparent);
@@ -52,7 +53,8 @@
 
 .toggle:hover,
 .bulk:hover,
-.historyButton:hover {
+.historyButton:hover,
+.helpButton:hover {
   background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
 }
 
@@ -61,4 +63,12 @@
    action. `margin-left: auto` works because `.actions` is flex. */
 .historyButton {
   margin-left: auto;
+}
+
+/* v0.3: highlight the "N flagged" hunks summary in the meta row so it
+   reads as actionable signal, not decoration. */
+.flaggedSummary {
+  color: var(--vscode-editorWarning-foreground, #c4a000);
+  font-weight: 600;
+  cursor: help;
 }

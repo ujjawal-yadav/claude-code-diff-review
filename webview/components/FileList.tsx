@@ -2,6 +2,7 @@ import { Virtuoso } from 'react-virtuoso';
 import type { FileReview } from '../../src/types';
 import { useUi } from '../store';
 import { truncate } from '../utils/truncate';
+import { FlagChip } from './FlagChip';
 import styles from '../styles/FileList.module.css';
 
 const SUBAGENT_CHIP_MAX = 32;
@@ -72,6 +73,8 @@ function FileRow({ file, selected, onSelect }: { file: FileReview; selected: boo
             via {truncate(file.subagentId, SUBAGENT_CHIP_MAX)}
           </span>
         ) : null}
+        {/* v0.3: risk-flag chip — most-severe flag visible, tooltip lists all */}
+        <FlagChip flags={file.flags} />
         {counts.pending > 0 ? <span className={styles.pendingPill}>{counts.pending}</span> : null}
       </span>
     </button>

@@ -114,7 +114,13 @@
   padding: 0;
   display: flex;
   white-space: pre;
-  overflow-x: auto;
+  /* v0.3: was `overflow-x: auto` — that put a horizontal scrollbar on EVERY
+     cell in split view, producing a row of ugly scrollbars under each line.
+     Switched to `overflow: hidden` so long lines clip silently; the cell's
+     line content has a `title` attribute (see HunkBlock.tsx SplitView) so
+     hovering reveals the full text in a native tooltip. A future polish
+     (v0.4+) could restructure to a single per-hunk scrollbar; deferred. */
+  overflow: hidden;
   border-right: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
 }
 

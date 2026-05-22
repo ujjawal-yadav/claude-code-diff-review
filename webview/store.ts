@@ -48,6 +48,9 @@ export interface UiState {
   /** Open chat thread (only one at a time in v1). */
   chat: ChatThread | null;
 
+  /** v0.3: keyboard-shortcuts help overlay visibility. */
+  helpVisible: boolean;
+
   // mutations
   setSession(session: SessionReview, viewType: 'split' | 'unified'): void;
   setViewType(v: 'split' | 'unified'): void;
@@ -63,6 +66,10 @@ export interface UiState {
   setSidebarWidth(px: number): void;
   setHeaderHeight(px: number): void;
   setUndoDepth(depth: number): void;
+
+  // v0.3 — keyboard help overlay
+  setHelpVisible(v: boolean): void;
+  toggleHelpVisible(): void;
 
   // chat
   openChat(filePath: string, hunkIndex: number): void;
@@ -107,6 +114,7 @@ export const useUi = create<UiState>((set, get) => ({
   sidebarWidth: initialSidebarWidth,
   headerHeight: initialHeaderHeight,
   undoDepth: 0,
+  helpVisible: false,
 
   setSession(session, viewType) {
     const expanded: Record<string, boolean> = {};
@@ -198,6 +206,14 @@ export const useUi = create<UiState>((set, get) => ({
 
   setUndoDepth(depth) {
     set({ undoDepth: Math.max(0, Math.floor(depth)) });
+  },
+
+  setHelpVisible(v) {
+    set({ helpVisible: v });
+  },
+
+  toggleHelpVisible() {
+    set((s) => ({ helpVisible: !s.helpVisible }));
   },
 
   // -- chat ---------------------------------------------------------------

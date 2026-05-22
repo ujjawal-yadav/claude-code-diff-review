@@ -191,6 +191,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
     ...(history ? { history } : {}),
     agentId: 'claude-code',
+    // v0.3: opt-in (default true) heuristic flag triage.
+    riskFlagsEnabled: config.get<boolean>('riskFlags.enabled') ?? true,
   });
   panel.setOrchestrator(orchestrator);
 
