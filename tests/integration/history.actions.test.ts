@@ -165,8 +165,13 @@ describe('HistoryService.getPendingReviewsSummary (10.1.5b)', () => {
     const history = buildHistory();
     await seedSession(history, 'sA', TURN_A, [{ relPath: 'a.ts', before: 'a\n', after: 'A\n' }]);
 
-    // Within a 0ms cutoff, nothing is recoverable.
-    const summary = await history.getPendingReviewsSummary({ withinMs: 0 });
+    // A negative withinMs puts the cutoff in the future relative to NOW, so
+    // every session is older than the cutoff and excluded. Using -1 avoids
+    // the race-dependent edge case of withinMs:0 where, on platforms with
+    // coarse Date.now() granularity (notably macOS), `lastEventAt === cutoff`
+    // and the inclusive `>=` filter at historyService.ts:1069 keeps the
+    // just-recorded session in the result. Negative cutoff is unambiguous.
+    const summary = await history.getPendingReviewsSummary({ withinMs: -1 });
     expect(summary.totalSessions).toBe(0);
   });
 });
