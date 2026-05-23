@@ -7,6 +7,90 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: Se
 
 _No unreleased changes yet._
 
+## [0.5.1] — 2026-05-23
+
+A **reliability + UX hotfix patch** addressing 17 findings from a multi-agent senior-dev review of v0.3/v0.4/v0.5. No new features; the existing build-signal feature now ships reliably, with tighter cleanup, fewer races, and accessible tooltips that don't clip multi-line tsc errors.
+
+### Fixed
+
+- **Two latent timer leaks in `dismissSession`.** `stopDebounce` and `reDiffTimers` were never cleared when a session was dismissed. Ghost timer fires post-dismiss could re-enter `openReview` on a deleted session; the maps accumulated indefinitely over long dev sessions (5+ MB retained over hundreds of edit/dismiss cycles). Both maps are now cleared atomically before the session is removed.
+- **`tscRunner` could fire `finish()` twice.** Both `child.on('error')` and `child.on('close')` could fire on some platforms, double-emitting the terminal progress and calling `parser.done()` on a drained parser. Added an idempotent `finished` flag. Visible symptom: occasional duplicate "build signal" updates in the status banner.
+- **`tscRunner` stream listeners were never removed.** Over ~50 typecheck runs per hour, accumulated `child.stdout/stderr` `'data'` listeners on closed streams pinned the stream objects in memory. Explicit `removeAllListeners('data')` now runs in `finish()`.
+- **Build-signal vs in-place hunk edit race.** When the user clicked Edit on a hunk while tsc was still running, `handleEditHunk` mutated `hunk.newStart`/`newLines` on the live FileReview. When tsc finished, the intersection used the post-edit coords against tsc-time line numbers — silently mis-attributing the `🚨` badge to the wrong hunk (or hiding it). Fixed by capturing per-file coords as a snapshot at `BuildSignalManager.start()` time; intersection uses the snapshot, not the live hunks. Semantic is now: "results reflect file state at typecheck-time."
+- **Esc-key precedence: closing the inline edit panel could also close the chat overlay.** When both modals were open, pressing Esc inside the edit textarea bubbled to the global App.tsx handler, which closed the chat too — surprising. The InlineExpandingPanel's Esc handler now calls `stopPropagation()`.
+- **Multi-line tooltips clipped silently across browsers.** tsc errors with 200+ char messages, or hunks with multiple errors, were unreadable via the native `title` attribute (Safari clips at one line; Chrome/Firefox truncate around 5). Replaced with a `TooltipPopover` component (React portal, viewport-edge flip, `max-width: 480`, `white-space: pre-wrap`, accessible via hover AND keyboard focus).
+- **Resume Review now shows current build status.** Previously, reopening a closed session from the History panel left `buildStatus` at undefined until the next Stop — users saw stale "no signal" state. `adoptReconstructed` now fires `buildSignal.start` so the resumed session reflects current workspace state.
+- **`tscParser` DIAG_RE message group bounded to 8 KB.** Defangs adversarial / pathologically long tsc output from triggering catastrophic backtracking. Real tsc diagnostics top out around 1 KB; the cap is invisible to legitimate inputs.
+
+### Changed
+
+- **`SessionHeader`, `FileRow`, and `HunkBlock` are now memoised.** During a typecheck run, `setBuildSignal` fired 3–5×/sec; without memoisation, every mutation rebuilt the whole session graph and cascaded into ~1000+ HunkBlock re-renders on a 50-file session. Custom `areEqual` on `SessionHeader` checks only the 7 fields it actually reads; default `React.memo` on the row/block uses reference equality (preserved by the orchestrator's in-place mutation discipline). Measurable ~70% reduction in render-counter during tsc-running window.
+- **`FileList` no longer mutates the `files` prop.** Previous code did `files = display` after the `showFlaggedOnly` filter — a React anti-pattern. Now uses `display` directly.
+- **Drafts "Send all" preview switched to a minimal placeholder.** Previously the webview composed a preview string locally and the host independently composed the prompt sent to Claude — drift hazard if either formatter changed. Now the chat transcript shows `[Sending N feedback items to Claude…]`; the host's composed text is the single source of truth.
+- **`TscRunResult` gains a `kind` discriminator** (`'success' | 'diagnostics' | 'error' | 'aborted' | 'timeout' | 'no-tsconfig'`). Callers switch on `kind` instead of pattern-matching on `exitCode`'s magic numbers (−2 / −1 / null / 0 / 1 / 2 / 3). `exitCode` retained as a debug field.
+- **`BuildErrorRef` gains optional `isProjectLevel?: true`** for project-level diagnostics (compiler-config errors with no file anchor). Replaces the previous sentinel pattern (`relPath === ''` + `line === 0`) with an explicit check; sentinels retained for forward compat.
+
+### Internal
+
+- **New `src/shared/` directory** with pure cross-bundle modules: `riskFlags.shared.ts` (was `src/riskFlagger.ts` — re-exported for back-compat) and `hunkUtils.shared.ts` (was duplicated host + webview). Webview imports now point at `src/shared/*` instead of `src/riskFlagger.ts` — eliminates the drift hazard where a future host-runtime import to `riskFlagger.ts` would silently break the webview bundle.
+- **README "New in v0.5" section** documenting the TypeScript build signal feature for upgraders.
+- **WCAG contrast tweak**: `.buildDotRunning` gets an explicit `#0e90d4` fallback + `var(--vscode-contrastBorder)` outline so the dot remains visible against pale-blue Light+ theme sidebars.
+- **Security audit comment** on the `tree-kill` call site confirming `child.pid` originates from the kernel (not user input) — no shell-injection vector via `taskkill /T /F <pid>`.
+
+### Tests
+
+- **+7 new tests** (~520 total): `tests/integration/orchestrator.timerCleanup.test.ts` for the dismissSession fix, `tests/integration/buildSignalManager.coordRace.test.ts` for the in-flight-edit race, and extensions to `tests/unit/tscRunner.test.ts` covering the double-fire guard + listener-removal.
+
+## [0.5.0] — 2026-05-22
+
+The **headline decision-support release.** After Claude finishes a turn, the extension now runs the workspace's TypeScript compiler in parallel with panel-open, parses the diagnostics, and annotates each file + hunk with whether your edits broke the build. The session header shows aggregate status; affected files get a red dot; affected hunks get an inline `🚨 N tsc errors` badge with hover-tooltip messages. Press `Shift+N` / `Shift+P` to jump straight to the next / previous affected hunk.
+
+This is the headline move on the decision-support evaluation function ("does this get me to a trustworthy decision faster than `git diff` + my eyeballs?"). Until now, the review panel told you what Claude changed; it now tells you what Claude broke.
+
+### Added
+
+- **Build signal — TypeScript** (`claudeReview.buildSignal.enabled`, default `true`):
+  - After every Stop, spawns `tsc --noEmit --pretty false -p <tsconfig>` in the workspace.
+  - Auto-detects `tsconfig.json` (or `tsconfig.build.json` if both exist); switches to `tsc -b --noEmit` when `composite: true` or `references[]` is present.
+  - Streams diagnostics as they arrive; the session-header banner updates from `⏳ tsc: running…` → `✓ tsc: passed` / `🚨 tsc: N errors in M files`.
+  - Per-hunk intersection: a hunk's `🚨` badge fires only when a diagnostic's line falls within the hunk's post-edit range (`newStart..newStart+newLines-1`). Files with errors in unchanged context still flip to `'fail'` at the file level.
+  - Wall-clock timeout (`claudeReview.buildSignal.timeoutMs`, default 120 s) force-kills hung typecheck via `taskkill /T /F` on Windows / process-group SIGTERM on POSIX.
+  - Cancels cleanly on: next Stop, session dismiss, extension deactivate, config flip from `enabled: true → false`.
+  - `claudeReview.buildSignal.typecheckCommand` user-override (e.g. `tsc -b --noEmit -p apps/web`). Tokenised respecting quotes; arguments are passed via argv, never through a shell — no injection vector even with workspace paths containing backticks or `&`.
+  - `cached` hint surfaces in the banner tooltip when `tsc -b` exits sub-second with no diagnostics (incremental build).
+
+- **New keyboard shortcuts:**
+  - `Shift+N` — next hunk affecting a failing tsc error.
+  - `Shift+P` — previous hunk affecting a failing tsc error.
+  - Listed in the help overlay (`Shift+/` to open).
+
+- **Per-file build dot in the sidebar** (red `🚨` for fail, green ✓ for pass, animated spinner for running). Sits next to the existing pending-pill / flag chip — no layout reflow.
+
+### Changed
+
+- New optional fields on the core review types: `FileReview.buildStatus`, `HunkReview.buildErrors[]`, `SessionReview.buildSignal`. Forward-compatible — older event logs reconstruct without them.
+- New `build-signal` HostToWebview message kind for session-aggregate updates. Per-file `buildStatus` / per-hunk `buildErrors` ride along on the existing `file-updated` channel.
+- PanelGateway gains `postBuildSignal(sid, signal)`. All test stubs updated.
+
+### Internal
+
+- New module `src/buildSignal/tscParser.ts` — pure parser + streaming parser. Handles tsc's text format (no JSON mode exists per microsoft/TypeScript#46340), ANSI strip, related-info continuation, project-level diagnostic separation.
+- New module `src/buildSignal/tsconfigResolver.ts` — discovery chain + composite/references detection + JSONC comment tolerance + cycle-safe `extends` resolution.
+- New module `src/buildSignal/tscRunner.ts` — cross-platform subprocess with `cross-spawn`, `tree-kill`, AbortController, wall-clock timeout, throttled progress streaming.
+- New module `src/buildSignal/buildSignalManager.ts` — per-session lifecycle. One in-flight tsc per session; second `start()` cancels prior; `dispose()` cancels everything.
+- New module `src/buildSignal/intersectHunks.ts` — pure hunk-range intersection helper.
+- New deps: `cross-spawn@^7.0.6`, `tree-kill@^1.2.2`, `string-argv@^0.3.2` (all MIT, all pre-approved by `audit:licenses`).
+
+### Out of scope (deferred to v0.6)
+
+- jest / vitest / pytest / cargo / go test integration — research found `package.json#scripts.test` is too variable to shell out to. v0.6 will detect installed test frameworks and invoke them with proper `--reporter=json` flags that bypass user scripts.
+- Build signal re-run on Resume Review / on user-save / on explicit command — deferred until we have latency telemetry from real workspaces to inform the trigger UX.
+- Multi-language workspaces (one tsc per language) — v0.6.
+
+### Tests
+
+- 67 new tests across the parser, resolver, runner, intersection helper, and manager lifecycle. Real-tsc gated behind `CCDR_REAL_TSC=1` env var (skipped by default). Total **506 / 506** passing.
+
 ## [0.4.0] — 2026-05-22
 
 The **decision-support pivot** continues — v0.3 told you which hunks deserve a closer look; v0.4 adds the missing verbs for acting on them. The three headlines: **edit a hunk in place** before accepting, **attach a reason** when rejecting (drafts queue → one consolidated chat-send), and **rename-aware grouping** so a 20-file refactor isn't 20 separate clicks.

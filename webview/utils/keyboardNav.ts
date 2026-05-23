@@ -79,6 +79,40 @@ export function prevFlaggedHunk(
   });
 }
 
+/**
+ * v0.5: next hunk that carries at least one build-signal error (i.e. tsc
+ * flagged a line within its range). Used by `Shift+N` to jump straight to
+ * the next hunk that breaks the build.
+ */
+export function nextBuildAffectedHunk(
+  session: SessionReview,
+  currentFile: string | null,
+  currentHunk: number | null,
+): HunkPosition | null {
+  return seekHunk(session, currentFile, currentHunk, 'forward', (pos) => {
+    const file = session.files.find((f) => f.filePath === pos.filePath);
+    if (!file) return false;
+    const hunk = file.hunks[pos.hunkIndex];
+    if (!hunk) return false;
+    return (hunk.buildErrors?.length ?? 0) > 0;
+  });
+}
+
+/** v0.5: symmetric previous. Used by `Shift+P`. */
+export function prevBuildAffectedHunk(
+  session: SessionReview,
+  currentFile: string | null,
+  currentHunk: number | null,
+): HunkPosition | null {
+  return seekHunk(session, currentFile, currentHunk, 'backward', (pos) => {
+    const file = session.files.find((f) => f.filePath === pos.filePath);
+    if (!file) return false;
+    const hunk = file.hunks[pos.hunkIndex];
+    if (!hunk) return false;
+    return (hunk.buildErrors?.length ?? 0) > 0;
+  });
+}
+
 // --- internals --------------------------------------------------------------
 
 type Direction = 'forward' | 'backward';

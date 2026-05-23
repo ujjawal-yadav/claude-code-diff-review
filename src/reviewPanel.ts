@@ -145,6 +145,16 @@ export class ReviewPanelManager implements PanelGateway {
     this.post(sessionId, { type: 'rejection-drafts', drafts: drafts.slice() });
   }
 
+  /**
+   * v0.5 (build signal): push the session-level aggregate state. Per-file
+   * `buildStatus` and per-hunk `buildErrors` ride along on `file-updated`
+   * via the orchestrator's in-place mutation. This method is for the
+   * session header banner ("⏳ tsc: running…" / "🚨 tsc: 3 errors").
+   */
+  postBuildSignal(sessionId: SessionId, signal: import('./types.js').BuildSignal): void {
+    this.post(sessionId, { type: 'build-signal', sessionId, signal });
+  }
+
   postSessionCompleted(sessionId: SessionId, metrics: SessionMetrics): void {
     this.post(sessionId, { type: 'session-completed', sessionId, metrics });
   }

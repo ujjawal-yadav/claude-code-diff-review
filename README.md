@@ -57,6 +57,22 @@ A second status-bar item — `↶ N pending` — shows the total count of unfini
 
 ---
 
+## New in v0.5
+
+### TypeScript build signal
+
+After every Claude turn, the extension runs your workspace's TypeScript compiler in parallel with panel-open and annotates each file + hunk with whether it affects a failing typecheck. The session-header banner shows aggregate status (`⏳ tsc: running…` / `✓ tsc: passed` / `🚨 tsc: N errors in M files`); affected files get a red dot in the sidebar; affected hunks get an inline `🚨 N tsc errors` badge with hover-tooltip messages.
+
+- **Auto-detection.** Discovers `tsconfig.json` (or `tsconfig.build.json` if both exist); switches to `tsc -b --noEmit` for composite / project-references repos.
+- **Keyboard nav.** `Shift+N` jumps to the next hunk affecting a tsc error; `Shift+P` jumps to the previous.
+- **120-second wall-clock timeout** (configurable via `claudeReview.buildSignal.timeoutMs`). Process tree is force-killed on timeout (`taskkill /T /F` on Windows; SIGTERM-to-process-group on POSIX).
+- **Custom command.** `claudeReview.buildSignal.typecheckCommand` overrides the auto-detected invocation. Arguments are passed via argv, never through a shell — no injection vector even if your workspace path contains backticks or `&`.
+- **Disable** via `claudeReview.buildSignal.enabled: false`. No spawn, no banner, no annotations when off.
+
+`jest` / `vitest` / `pytest` / `cargo test` / `go test` integration arrives in v0.6 with proper `--reporter=json` invocations.
+
+---
+
 ## Setup
 
 ### 1. Install

@@ -39,11 +39,16 @@ export function ChatOverlay({ filePath, hunk, onClose }: Props): JSX.Element {
     if (chat?.chatId) return; // streaming in progress
     if (drafts.length === 0) return;
     const chatId = makeUuidV4();
-    // Surface the composed prompt locally too so the chat transcript shows
-    // what was actually sent to Claude (matches existing pattern of
-    // appendUserTurn before postMessage).
-    const localText = composeDraftsPreview(drafts);
-    appendUserTurn(localText, chatId);
+    // v0.5.1 (LH4): show a minimal placeholder in the chat transcript and
+    // let the host's `composeBatchFeedbackMessage` be the source of truth
+    // for what Claude actually sees. The user already reviewed their
+    // reasons in the Drafts panel above the chat — no information loss.
+    // Removes the host/webview drift hazard from the previous local
+    // `composeDraftsPreview` duplication.
+    appendUserTurn(
+      `[Sending ${drafts.length} feedback item${drafts.length === 1 ? '' : 's'} to Claude…]`,
+      chatId,
+    );
     send({
       type: 'send-rejection-feedback',
       chatId,
@@ -206,26 +211,6 @@ export function ChatOverlay({ filePath, hunk, onClose }: Props): JSX.Element {
       </form>
     </aside>
   );
-}
-
-/**
- * v0.4 (A5): preview text rendered locally when the user clicks "Send all
- * to Claude" so the chat transcript shows what was actually sent. Mirrors
- * the host's `composeBatchFeedbackMessage`. Kept here to avoid host→webview
- * import; the host re-composes the same shape from its own drafts source
- * of truth before streaming.
- */
-function composeDraftsPreview(
-  drafts: ReadonlyArray<{ relPath: string; hunkIdx: number; reason: string }>,
-): string {
-  const lines: string[] = [];
-  lines.push(`I rejected ${drafts.length} hunk${drafts.length === 1 ? '' : 's'} in this turn. Please rework with these in mind:`);
-  lines.push('');
-  for (const d of drafts) {
-    const oneLine = d.reason.replace(/\s+/g, ' ').trim();
-    lines.push(`• ${d.relPath} hunk ${d.hunkIdx + 1}: "${oneLine}"`);
-  }
-  return lines.join('\n');
 }
 
 /**

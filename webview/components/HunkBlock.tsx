@@ -1,27 +1,17 @@
-import { useEffect, useRef } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import type { HunkReview, SessionReview } from '../../src/types';
 import { useUi } from '../store';
 import { send } from '../vscode';
 import { FlagBadges } from './FlagChip';
 import { InlineExpandingPanel } from './InlineExpandingPanel';
+import { TooltipPopover } from './TooltipPopover';
+// v0.5.1 (LH5): pure cross-bundle helper (was duplicated here + in
+// `src/reviewOrchestrator.ts`).
+import { extractHunkAfterView } from '../../src/shared/hunkUtils.shared';
 import styles from '../styles/HunkBlock.module.css';
 
 const EDIT_BYTES_CAP   = 256 * 1024;
 const REASON_BYTES_CAP = 4 * 1024;
-
-/** Pure helper: extract the hunk's after view (context + `+` lines) as
- *  plain text, prefixes stripped. Mirrors src/reviewOrchestrator.ts
- *  `extractHunkAfterView`. Kept inline to avoid host→webview import. */
-function extractAfterView(hunk: HunkReview): string {
-  const out: string[] = [];
-  for (const line of hunk.lines) {
-    const tag = line.charAt(0);
-    if (tag === '+' || tag === ' ') {
-      out.push(line.slice(1));
-    }
-  }
-  return out.join('\n');
-}
 
 interface Props {
   filePath: string;
@@ -54,7 +44,14 @@ interface Props {
  * full keyboard control, predictable accessibility, no library version drift.
  * The `viewType` prop is wired so a future swap is local to this component.
  */
-export function HunkBlock({ filePath, hunk, viewType, selected, onSelect, subagentId, session }: Props): JSX.Element {
+/**
+ * v0.5.1 (LH9): memoized so unrelated session mutations don't trigger a
+ * cascade of HunkBlock re-renders. Hunk references are preserved across
+ * `applyFileUpdate` for unchanged hunks, so default shallow-equal works.
+ */
+export const HunkBlock = memo(HunkBlockImpl);
+
+function HunkBlockImpl({ filePath, hunk, viewType, selected, onSelect, subagentId, session }: Props): JSX.Element {
   const decided = hunk.status !== 'pending';
   const openChat = useUi((s) => s.openChat);
   const editMode = useUi((s) => s.editMode);
@@ -96,6 +93,23 @@ export function HunkBlock({ filePath, hunk, viewType, selected, onSelect, subage
         <code id={`hunk-header-${hunk.index}`} className={styles.hunkHeader}>{hunk.header}</code>
         {/* v0.3: per-hunk risk flag badges (deletion, large-hunk, removed-error-handling, etc.) */}
         <FlagBadges flags={hunk.flags} />
+        {/* v0.5: per-hunk build-signal badge — surfaces when tsc errors fall
+            within this hunk's line range. v0.5.1 (LH3): hover/focus renders
+            a full popover (not the native `title` attribute, which clips
+            multi-line content across browsers). */}
+        {hunk.buildErrors && hunk.buildErrors.length > 0 && (
+          <TooltipPopover
+            content={hunk.buildErrors.map((e) => `TS${e.code} (line ${e.line}): ${e.message}`).join('\n')}
+            ariaLabel={`${hunk.buildErrors.length} tsc error${hunk.buildErrors.length === 1 ? '' : 's'} affect this hunk`}
+          >
+            <span
+              className={styles.buildErrorBadge}
+              tabIndex={0}
+            >
+              🚨 {hunk.buildErrors.length} tsc {hunk.buildErrors.length === 1 ? 'error' : 'errors'}
+            </span>
+          </TooltipPopover>
+        )}
         {/* v0.4 (A8 cheap): rename-group chip. Click to expand the inline group panel. */}
         {hunk.renameGroupId && session?.renameGroups?.[hunk.renameGroupId] && (
           <button
@@ -181,7 +195,7 @@ export function HunkBlock({ filePath, hunk, viewType, selected, onSelect, subage
       {isEditing && hunk.status === 'pending' && (
         <InlineExpandingPanel
           mode="edit"
-          initialValue={extractAfterView(hunk)}
+          initialValue={extractHunkAfterView(hunk)}
           maxBytes={EDIT_BYTES_CAP}
           placeholder="Edit the after-content of this hunk and click Save."
           saveLabel="Save edit"

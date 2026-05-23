@@ -83,3 +83,39 @@
   white-space: nowrap;
   flex-shrink: 0;
 }
+
+/* v0.5: per-file build-signal dot. Smaller than the status dot; sits next
+   to flag chip / pending pill. */
+.buildDotRunning,
+.buildDotPass,
+.buildDotFail {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+/* v0.5.1 (LH18): explicit fallback color + contrast border. The
+   `--vscode-progressBar-background` token resolves to a pale blue on
+   the Light+ theme; against the white sidebar-bg it barely contrasts.
+   The 1px contrast border ensures the dot remains visible against
+   either theme. */
+.buildDotRunning {
+  background: var(--vscode-progressBar-background, #0e90d4);
+  border: 1px solid var(--vscode-contrastBorder, transparent);
+  animation: ccdr-build-pulse 1.4s ease-in-out infinite;
+}
+
+.buildDotPass {
+  background: var(--vscode-testing-iconPassed, #3fb950);
+}
+
+.buildDotFail {
+  background: var(--vscode-errorForeground, #f14c4c);
+}
+
+@keyframes ccdr-build-pulse {
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 1; }
+}

@@ -187,6 +187,7 @@ import type {
   HunkStatus,
   TokenUsage,
   SessionMetrics,
+  BuildSignal,
 } from './types.js';
 import type { HistoryEvent } from './history/historyEvents.js';
 import type { SessionIndexEntry } from './history/historyTypes.js';
@@ -249,6 +250,18 @@ export type HostToWebview =
         reason: string;
         ts: number;
       }>;
+    }
+  | {
+      /**
+       * v0.5 (build signal): session-aggregate update. Fires at start (status
+       * 'running'), throttled progress updates during streaming, and at
+       * terminal completion ('pass' / 'fail' / 'unknown'). Per-file fields
+       * (`buildStatus`, hunk `buildErrors`) ride along on `file-updated` —
+       * this kind is for the session-header banner only.
+       */
+      type: 'build-signal';
+      sessionId: string;
+      signal: BuildSignal;
     };
 
 // --------------------------------------------------------------------------

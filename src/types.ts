@@ -142,6 +142,75 @@ export type FileWarning =
   | 'vanished';
 
 /**
+ * v0.5 (build signal) — terminal-or-transient state of the workspace's
+ * TypeScript compiler against a single FileReview after a turn closes.
+ *
+ *  - 'unknown' : initial state before the runner fires, OR after a
+ *                timeout / crash / user-cancel.
+ *  - 'running' : tsc spawn is in flight; partial results may still update
+ *                the field as parsing completes.
+ *  - 'pass'    : tsc completed cleanly (exit 0) and produced no error-
+ *                category diagnostics for this file.
+ *  - 'fail'    : at least one error-category diagnostic was emitted whose
+ *                file path matches this FileReview.
+ */
+export type BuildStatus = 'unknown' | 'running' | 'pass' | 'fail';
+
+/**
+ * v0.5 (build signal) — a single tsc diagnostic, normalised to the
+ * extension's view of the workspace. Project-level diagnostics (no file
+ * anchor) carry an empty `relPath` and live on `SessionReview.buildSignal
+ * .projectDiagnostics` instead of any per-file list.
+ */
+export interface BuildErrorRef {
+  /** Workspace-relative, forward-slash. Empty for project-level diagnostics. */
+  relPath: string;
+  /** 1-based, from tsc output. 0 for project-level (no file location). */
+  line: number;
+  col: number;
+  /** tsc diagnostic code, e.g. 2322. */
+  code: number;
+  severity: 'error' | 'warning';
+  message: string;
+  /**
+   * v0.5.1 (LH7): explicit flag for diagnostics emitted without a file
+   * anchor (e.g. `error TS5023: Unknown compiler option 'foo'`). Prior
+   * to v0.5.1, readers had to check `relPath === ''` + `line === 0` as
+   * sentinels — error-prone. Now the flag is the source of truth; the
+   * empty `relPath` / zero `line` remain for backward compat with any
+   * (host-only, never persisted) consumer that still reads them.
+   */
+  isProjectLevel?: true;
+}
+
+/**
+ * v0.5 (build signal) — session-level aggregate. The orchestrator's
+ * BuildSignalManager owns this and pushes updates via the `build-signal`
+ * HostToWebview message. The per-file `FileReview.buildStatus` field and
+ * per-hunk `HunkReview.buildErrors` field carry the projection used by
+ * the dot indicator and inline badges respectively.
+ */
+export interface BuildSignal {
+  status: BuildStatus;
+  /** ms-epoch when the current run started; null when status === 'unknown'. */
+  startedAt: number | null;
+  /** ms-epoch when the run finished; null while running or unknown. */
+  finishedAt: number | null;
+  totalErrors: number;
+  totalWarnings: number;
+  /** Diagnostics with no file anchor (compiler config errors, etc.). */
+  projectDiagnostics: BuildErrorRef[];
+  /** Whatever stderr produced when exit code was 2 or 3. */
+  fatalStderr: string | null;
+  /**
+   * `true` when tsc -b reported the build was incremental-cached
+   * (sub-second exit with no diagnostics). Surfaces as a tooltip hint
+   * so the user understands a 0.1s "tsc: passed" run is genuine.
+   */
+  cached?: boolean;
+}
+
+/**
  * v0.3 — heuristic risk flags surfaced on files and hunks to help the user
  * prioritise which hunks to review most carefully. File-level flags apply to
  * the file as a whole (sensitive-path, lockfile, test-file). Hunk-level
@@ -182,6 +251,17 @@ export interface HunkReview {
    * applies.
    */
   renameGroupId?: string;
+  /**
+   * v0.5 (build signal). Per-hunk projection of the typecheck result:
+   * tsc diagnostics whose line falls within this hunk's post-edit range
+   * `[newStart, newStart + newLines - 1]`. Undefined / empty array ⇒
+   * the hunk's lines weren't flagged (but the FILE may still be `'fail'`
+   * if errors landed on unchanged context — see FileReview.buildStatus).
+   *
+   * Surfaced as the `🚨 N tsc errors` inline badge with hover tooltip
+   * carrying each error's message.
+   */
+  buildErrors?: BuildErrorRef[];
 }
 
 export interface FileReview {
@@ -213,6 +293,19 @@ export interface FileReview {
    * (most-severe flag wins; tooltip lists all).
    */
   flags?: RiskFlag[];
+  /**
+   * v0.5 (build signal). Result of running the workspace's typecheck
+   * against this file. Starts as undefined (or 'unknown' once the runner
+   * has been told to spawn); transitions to 'running' on spawn-start;
+   * settles on 'pass' / 'fail' on completion; falls back to 'unknown' on
+   * timeout / crash / cancel.
+   *
+   * The runner mutates this field in-place on the live FileReview and
+   * calls `panel.postFileUpdated` so the webview's `applyFileUpdate`
+   * picks it up. User hunk decisions are preserved because the runner
+   * never touches `hunk.status`.
+   */
+  buildStatus?: BuildStatus;
 }
 
 export interface SessionReview {
@@ -234,6 +327,13 @@ export interface SessionReview {
    * positives). Undefined when no groups were detected for this session.
    */
   renameGroups?: Record<string, Array<{ filePath: string; hunkIndex: number }>>;
+  /**
+   * v0.5 (build signal). Session-level aggregate of the typecheck result.
+   * Owned by `BuildSignalManager`; updated via the `build-signal`
+   * HostToWebview message. Undefined when the feature is disabled or
+   * before the first run fires.
+   */
+  buildSignal?: BuildSignal;
 }
 
 // --------------------------------------------------------------------------

@@ -97,6 +97,11 @@ function InlineEditor({
   const onKeyDown = (ev: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (ev.key === 'Escape') {
       ev.preventDefault();
+      // v0.5.1 (LH8): stop the event from bubbling to App.tsx's window-
+      // level Esc handler. Without stopPropagation, the global handler
+      // would ALSO close the chat overlay (if open) on the same key
+      // press → two modals close at once, which surprises users.
+      ev.stopPropagation();
       onCancel();
       return;
     }

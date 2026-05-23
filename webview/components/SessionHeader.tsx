@@ -1,6 +1,8 @@
+import { memo } from 'react';
 import type { SessionReview } from '../../src/types';
 import { useUi } from '../store';
 import { send } from '../vscode';
+import { TooltipPopover } from './TooltipPopover';
 import styles from '../styles/SessionHeader.module.css';
 
 interface Props {
@@ -9,7 +11,32 @@ interface Props {
   banner: string | null;
 }
 
-export function SessionHeader({ session, viewType, banner }: Props): JSX.Element {
+/**
+ * v0.5.1 (LH9): memoized with a custom `areEqual` that checks only the
+ * specific fields the header renders. Without this, every `setBuildSignal`
+ * (3-5 times during a typecheck run) recreates the session object and
+ * re-renders the header — wasteful since only `buildSignal` changes.
+ *
+ * Comparison strategy:
+ *   - `files` reference equality covers "no file added/removed" — typical
+ *     case during typecheck progress. `applyFileUpdate` produces a new
+ *     files array only when a file actually changes, so this is correct.
+ *   - `metrics` reference equality covers "no hunk decided" — orchestrator
+ *     produces a new metrics object only on `recomputeMetrics`.
+ *   - `buildSignal`, `lastAssistantMessage` are direct value checks.
+ *   - `viewType`, `banner` are scalars.
+ */
+export const SessionHeader = memo(SessionHeaderImpl, (prev, next) => {
+  return prev.session.sessionId === next.session.sessionId
+      && prev.session.files === next.session.files
+      && prev.session.metrics === next.session.metrics
+      && prev.session.buildSignal === next.session.buildSignal
+      && prev.session.lastAssistantMessage === next.session.lastAssistantMessage
+      && prev.viewType === next.viewType
+      && prev.banner === next.banner;
+});
+
+function SessionHeaderImpl({ session, viewType, banner }: Props): JSX.Element {
   const totalHunks = session.metrics.totalHunks;
   const decided = session.metrics.acceptedHunks + session.metrics.rejectedHunks;
   const undoDepth = useUi((s) => s.undoDepth);
@@ -18,6 +45,11 @@ export function SessionHeader({ session, viewType, banner }: Props): JSX.Element
   const setShowFlaggedOnly = useUi((s) => s.setShowFlaggedOnly);
   const wrapLines = useUi((s) => s.wrapLines);
   const setWrapLines = useUi((s) => s.setWrapLines);
+  const buildSignal = session.buildSignal;
+  // v0.5: count files whose buildStatus === 'fail' for the banner copy.
+  const buildFailedFiles = buildSignal && buildSignal.status === 'fail'
+    ? session.files.filter((f) => f.buildStatus === 'fail').length
+    : 0;
   // v0.3: count hunks that carry at least one risk flag — surfaces as a
   // prioritisation hint in the header meta row.
   const flaggedCount = session.files.reduce(
@@ -40,6 +72,18 @@ export function SessionHeader({ session, viewType, banner }: Props): JSX.Element
               >
                 {flaggedCount} flagged
               </span>
+            </>
+          ) : null}
+          {buildSignal ? (
+            <>
+              {' · '}
+              <BuildSignalChip
+                status={buildSignal.status}
+                totalErrors={buildSignal.totalErrors}
+                failedFiles={buildFailedFiles}
+                cached={buildSignal.cached === true}
+                fatalStderr={buildSignal.fatalStderr}
+              />
             </>
           ) : null}
         </span>
@@ -108,6 +152,68 @@ export function SessionHeader({ session, viewType, banner }: Props): JSX.Element
         </button>
       </div>
     </header>
+  );
+}
+
+/**
+ * v0.5: session-header build-signal chip. Renders one of four states:
+ *   - 'running' (spinner)
+ *   - 'pass' (green check; cached hint in tooltip if applicable)
+ *   - 'fail' (red alarm + error count + file count)
+ *   - 'unknown' (gray; tooltip carries fatalStderr if any)
+ */
+function BuildSignalChip({
+  status,
+  totalErrors,
+  failedFiles,
+  cached,
+  fatalStderr,
+}: {
+  status: 'unknown' | 'running' | 'pass' | 'fail';
+  totalErrors: number;
+  failedFiles: number;
+  cached: boolean;
+  fatalStderr: string | null;
+}): JSX.Element {
+  let text: string;
+  let title: string;
+  let className: string;
+  switch (status) {
+    case 'running':
+      text = '⏳ tsc: running…';
+      title = 'TypeScript compiler is running against the workspace.';
+      className = styles.buildRunning ?? '';
+      break;
+    case 'pass':
+      text = '✓ tsc: passed';
+      title = cached
+        ? 'tsc finished in <1.5 s with no diagnostics — this run used the incremental cache (.tsbuildinfo).'
+        : 'TypeScript compiler completed cleanly. No errors or warnings emitted.';
+      className = styles.buildPass ?? '';
+      break;
+    case 'fail':
+      text = `🚨 tsc: ${totalErrors} ${totalErrors === 1 ? 'error' : 'errors'} in ${failedFiles} ${failedFiles === 1 ? 'file' : 'files'}`;
+      title = 'TypeScript compiler reported errors. Affected hunks carry an inline 🚨 badge — review those first.';
+      className = styles.buildFail ?? '';
+      break;
+    case 'unknown':
+    default:
+      text = 'tsc: unknown';
+      title = fatalStderr
+        ? `Build runner could not complete:\n${fatalStderr}`
+        : 'Build signal is in an indeterminate state (cancelled, timed out, or no TypeScript project detected).';
+      className = styles.buildUnknown ?? '';
+      break;
+  }
+  // v0.5.1 (LH3): use TooltipPopover for multi-line `fatalStderr` content.
+  // Native `title` attribute clipped messages across browsers; the popover
+  // renders pre-wrap with max-width 480, accessible via hover + focus.
+  return (
+    <TooltipPopover content={title}>
+      <span className={className} tabIndex={0}>
+        {text}
+      </span>
+    </TooltipPopover>
   );
 }
 

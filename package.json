@@ -2,7 +2,7 @@
   "name": "claude-code-diff-review",
   "displayName": "Claude Code Diff Review",
   "description": "Per-hunk review of Claude Code session changes with in-context AI chat. Pro/Max OAuth and API-key auth supported.",
-  "version": "0.4.0",
+  "version": "0.5.1",
   "publisher": "UjjawalYadav",
   "license": "MIT",
   "engines": {
@@ -129,6 +129,21 @@
           "default": true,
           "description": "Surface heuristic-based risk flags on files and hunks (sensitive paths like .env / migrations / auth, pure deletions, removed error handling, removed null checks, large hunks, lockfiles, test files). Flags help prioritise which hunks to review most carefully — useful for sessions with 20+ edits. Off → no flag chips render."
         },
+        "claudeReview.buildSignal.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "v0.5 build signal — run the workspace's TypeScript compiler (tsc --noEmit) after Claude finishes a turn and annotate each file + hunk with whether it affects a failing typecheck. The session-header banner shows aggregate status (running/passed/failed); affected files get a red dot in the sidebar; affected hunks get an inline 🚨 badge. Off → no spawn, no banner, no annotations. Currently supports TypeScript only; jest/vitest/pytest/cargo/go support arrives in v0.6."
+        },
+        "claudeReview.buildSignal.typecheckCommand": {
+          "type": "string",
+          "default": "",
+          "description": "v0.5 build signal — override the auto-detected tsc invocation. Example: `tsc -b --noEmit -p apps/web`. Leave blank to auto-detect: `tsc --noEmit -p tsconfig.json` for single-tsconfig repos; `tsc -b --noEmit` when `composite: true` or `references[]` is present. The string is tokenised respecting quotes; arguments are passed via argv, NOT through a shell — no shell injection vector even if your workspace path contains backticks or `&`."
+        },
+        "claudeReview.buildSignal.timeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "description": "v0.5 build signal — wall-clock timeout for the typecheck subprocess in milliseconds. On timeout, the process tree is force-killed (taskkill on Windows, SIGTERM on POSIX); affected files surface as buildStatus: 'unknown' with a banner indication. Distinct from cancel-on-next-Stop. 120 s default; raise on slow monorepos."
+        },
         "claudeReview.port": {
           "type": "number",
           "default": 53117,
@@ -213,9 +228,13 @@
     "vscode:prepublish": "npm run build"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.30.1"
+    "@anthropic-ai/sdk": "^0.30.1",
+    "cross-spawn": "^7.0.6",
+    "string-argv": "^0.3.2",
+    "tree-kill": "^1.2.2"
   },
   "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
     "@types/diff": "^5.2.2",
     "@types/node": "^20.14.10",
     "@types/react": "^18.3.3",

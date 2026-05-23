@@ -11,6 +11,7 @@ import { HistoryPanelManager } from './historyPanel.js';
 import { startServer, ServerHandle } from './server.js';
 import { SnapshotStore } from './snapshotStore.js';
 import { ReviewOrchestrator } from './reviewOrchestrator.js';
+import { BuildSignalManager } from './buildSignal/buildSignalManager.js';
 import { ReviewPanelManager } from './reviewPanel.js';
 import { StatusBarController } from './statusBarController.js';
 import { PendingStatusBar } from './pendingStatusBar.js';
@@ -179,6 +180,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // schedule a debounced refresh. Assigned a few lines below, after the
   // live StatusBarController is constructed.
   let pendingStatusBar: PendingStatusBar | null = null;
+
+  // v0.5 (build signal): per-session typecheck runner. Constructed BEFORE
+  // the orchestrator so we can pass it in; injected into options. Cleanup
+  // wires through `context.subscriptions` so deactivate cancels all runs.
+  const buildSignalManager = new BuildSignalManager(
+    { logger, panel },
+    {
+      enabled:         config.get<boolean>('buildSignal.enabled')   ?? true,
+      timeoutMs:       config.get<number>('buildSignal.timeoutMs')  ?? 120_000,
+      overrideCommand: config.get<string>('buildSignal.typecheckCommand') ?? '',
+    },
+  );
+  context.subscriptions.push({ dispose: () => buildSignalManager.dispose() });
+
   const orchestrator = new ReviewOrchestrator({
     store, panel, logger,
     onChange: () => {
@@ -193,6 +208,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     agentId: 'claude-code',
     // v0.3: opt-in (default true) heuristic flag triage.
     riskFlagsEnabled: config.get<boolean>('riskFlags.enabled') ?? true,
+    // v0.5: hand the orchestrator the build-signal manager so it can fire
+    // start/cancel at the openReview / dismissSession boundaries.
+    buildSignal: buildSignalManager,
   });
   panel.setOrchestrator(orchestrator);
 
@@ -464,6 +482,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       for (const sid of activeSessionIds(orchestrator)) {
         orchestrator.scheduleReDiff(sid, fp);
       }
+    }),
+  );
+
+  // v0.5 (build signal): hot-reload manager options when the user flips
+  // any `claudeReview.buildSignal.*` setting. Disabling cancels any
+  // in-flight run; enabling is picked up on the next openReview.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((ev) => {
+      if (!ev.affectsConfiguration('claudeReview.buildSignal')) return;
+      const cfg = vscode.workspace.getConfiguration('claudeReview');
+      buildSignalManager.updateOptions({
+        enabled:         cfg.get<boolean>('buildSignal.enabled')   ?? true,
+        timeoutMs:       cfg.get<number>('buildSignal.timeoutMs')  ?? 120_000,
+        overrideCommand: cfg.get<string>('buildSignal.typecheckCommand') ?? '',
+      });
+      logger?.info('extension', 'buildSignal.config.changed');
     }),
   );
 

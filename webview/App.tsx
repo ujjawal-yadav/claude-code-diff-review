@@ -8,7 +8,7 @@ import { ChatOverlay } from './components/ChatOverlay';
 import { Splitter } from './components/Splitter';
 import { HeaderSplitter } from './components/HeaderSplitter';
 import { KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp';
-import { nextHunk, prevHunk, nextFlaggedHunk, prevFlaggedHunk } from './utils/keyboardNav';
+import { nextHunk, prevHunk, nextFlaggedHunk, prevFlaggedHunk, nextBuildAffectedHunk, prevBuildAffectedHunk } from './utils/keyboardNav';
 import type { HostToWebview } from '../src/messages';
 import styles from './styles/App.module.css';
 
@@ -32,6 +32,7 @@ export function App(): JSX.Element {
   const headerHeight = useUi((s) => s.headerHeight);
   const setUndoDepth = useUi((s) => s.setUndoDepth);
   const setDrafts    = useUi((s) => s.setDrafts);
+  const setBuildSignal = useUi((s) => s.setBuildSignal);
 
   useEffect(() => {
     function onMessage(ev: MessageEvent) {
@@ -63,6 +64,11 @@ export function App(): JSX.Element {
           // v0.4 (A5): wholesale replace the local drafts mirror.
           setDrafts(msg.drafts);
           break;
+        case 'build-signal':
+          // v0.5: session-aggregate banner update. Per-file `buildStatus`
+          // + per-hunk `buildErrors` ride along on `file-updated`.
+          setBuildSignal(msg.signal);
+          break;
         case 'set-conflict-warning':
           pushToast({
             level: 'warn',
@@ -88,7 +94,7 @@ export function App(): JSX.Element {
     window.addEventListener('message', onMessage);
     send({ type: 'ready' });
     return () => window.removeEventListener('message', onMessage);
-  }, [setSession, applyHunk, applyFileUpdate, applySessionCompleted, setViewType, pushToast, appendStreamingDelta, finaliseStreaming, setChatError, setUndoDepth, setDrafts]);
+  }, [setSession, applyHunk, applyFileUpdate, applySessionCompleted, setViewType, pushToast, appendStreamingDelta, finaliseStreaming, setChatError, setUndoDepth, setDrafts, setBuildSignal]);
 
   // v0.3 — global keyboard handler for hunk navigation + actions.
   // The handler reads live state via `useUi.getState()` so the listener
@@ -193,6 +199,28 @@ export function App(): JSX.Element {
             if (file && hunk && hunk.status === 'pending') {
               state.setEditMode({ filePath: selectedFile, hunkIndex: selectedHunk });
             }
+          }
+          ev.preventDefault();
+          break;
+        }
+        case 'n': {
+          // v0.5: Shift+N → next build-affected hunk. Bare 'n' is unused.
+          if (!ev.shiftKey) break;
+          const pos = nextBuildAffectedHunk(sess, selectedFile, selectedHunk);
+          if (pos) {
+            state.selectFile(pos.filePath);
+            state.selectHunk(pos.hunkIndex);
+          }
+          ev.preventDefault();
+          break;
+        }
+        case 'p': {
+          // v0.5: Shift+P → previous build-affected hunk.
+          if (!ev.shiftKey) break;
+          const pos = prevBuildAffectedHunk(sess, selectedFile, selectedHunk);
+          if (pos) {
+            state.selectFile(pos.filePath);
+            state.selectHunk(pos.hunkIndex);
           }
           ev.preventDefault();
           break;

@@ -23,6 +23,8 @@ const BINDINGS: ReadonlyArray<Binding> = [
   { keys: ['k', '↑'],          description: 'Previous hunk (spills to previous file)' },
   { keys: ['Shift+J'],         description: 'Next flagged hunk (skips unflagged)' },
   { keys: ['Shift+K'],         description: 'Previous flagged hunk' },
+  { keys: ['Shift+N'],         description: 'Next hunk affecting failing tsc (v0.5)' },
+  { keys: ['Shift+P'],         description: 'Previous hunk affecting failing tsc (v0.5)' },
   { keys: ['a'],               description: 'Accept selected hunk' },
   { keys: ['r'],               description: 'Reject selected hunk' },
   { keys: ['e'],               description: 'Edit selected hunk in place (v0.4)' },

@@ -30,6 +30,7 @@ class NoopPanel implements PanelGateway {
   postSessionCompleted(_sid: SessionId, _m: SessionMetrics) {}
   postUndoStackDepth() {}
   postRejectionDrafts() {}
+  postBuildSignal(_sid: SessionId, _signal: import('../../src/types.js').BuildSignal) { void _signal; }
   close(_sid: SessionId) {}
 }
 

@@ -72,3 +72,30 @@
   font-weight: 600;
   cursor: help;
 }
+
+/* v0.5: build-signal chip variants in the meta row. */
+.buildRunning {
+  color: var(--vscode-foreground);
+  font-weight: 500;
+  cursor: help;
+  opacity: 0.85;
+}
+
+.buildPass {
+  color: var(--vscode-testing-iconPassed, #3fb950);
+  font-weight: 600;
+  cursor: help;
+}
+
+.buildFail {
+  color: var(--vscode-errorForeground, #f14c4c);
+  font-weight: 600;
+  cursor: help;
+}
+
+.buildUnknown {
+  color: var(--vscode-descriptionForeground);
+  font-weight: 500;
+  cursor: help;
+  opacity: 0.7;
+}

@@ -8,7 +8,11 @@
  */
 
 import type { RiskFlag } from '../../src/types';
-import { FLAG_LABEL, FLAG_DESCRIPTION, primaryFlag } from '../../src/riskFlagger';
+// v0.5.1 (LH5): pure cross-bundle module — see `src/shared/riskFlags.shared.ts`.
+// Previously this imported from `src/riskFlagger.ts`, which was de-facto
+// pure but one stray `node:*` import there would have broken the webview
+// bundle. The shared module makes the contract explicit.
+import { FLAG_LABEL, FLAG_DESCRIPTION, primaryFlag } from '../../src/shared/riskFlags.shared';
 import styles from '../styles/FlagChip.module.css';
 
 interface Props {

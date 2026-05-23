@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { FileReview, SessionReview, HunkStatus, SessionMetrics } from '../src/types';
+import type { BuildSignal, FileReview, SessionReview, HunkStatus, SessionMetrics } from '../src/types';
 import { getPersistedState, setPersistedState } from './vscode';
 
 /**
@@ -130,6 +130,9 @@ export interface UiState {
   // v0.4 (Wave 4) — view filters
   setShowFlaggedOnly(v: boolean): void;
   setWrapLines(v: boolean): void;
+
+  // v0.5 (build signal) — session-aggregate banner state
+  setBuildSignal(signal: BuildSignal | null): void;
 
   // chat
   openChat(filePath: string, hunkIndex: number): void;
@@ -340,6 +343,26 @@ export const useUi = create<UiState>((set, get) => ({
   setWrapLines(v) {
     set({ wrapLines: v });
     setPersistedState({ ...(getPersistedState<PersistedState>() ?? {}), wrapLines: v });
+  },
+
+  // -- v0.5 (build signal) ----------------------------------------------
+
+  /**
+   * Updates the session's `buildSignal` aggregate in-place. The webview
+   * uses this to drive the session-header banner; per-file `buildStatus`
+   * and per-hunk `buildErrors` ride along on `file-updated` messages and
+   * are applied by `applyFileUpdate` automatically.
+   */
+  setBuildSignal(signal) {
+    const session = get().session;
+    if (!session) return;
+    if (signal === null) {
+      const next = { ...session };
+      delete next.buildSignal;
+      set({ session: next });
+    } else {
+      set({ session: { ...session, buildSignal: signal } });
+    }
   },
 
   // -- chat ---------------------------------------------------------------

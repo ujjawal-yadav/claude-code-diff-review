@@ -31,6 +31,7 @@ class NoopPanel implements PanelGateway {
   postRejectionDrafts(_sid: SessionId, drafts: ReadonlyArray<RejectionDraft>) {
     this.drafts.push([...drafts]);
   }
+  postBuildSignal(_sid: SessionId, _signal: import('../../src/types.js').BuildSignal) { void _signal; }
   close(_sid: SessionId) {}
 }
 

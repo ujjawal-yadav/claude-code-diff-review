@@ -13,6 +13,7 @@ import {
   asAbsPath,
   asSessionId,
   AbsPath,
+  BuildSignal,
   ComputedDiff,
   FileReview,
   FileStatus,
@@ -76,6 +77,12 @@ export interface PanelGateway {
    * a queue with realistic max size (<50 entries).
    */
   postRejectionDrafts(sessionId: SessionId, drafts: ReadonlyArray<RejectionDraft>): void;
+  /**
+   * v0.5 (build signal): push the session-level aggregate state. Per-file
+   * `buildStatus` rides along on `postFileUpdated`; this method is for
+   * the session-header banner.
+   */
+  postBuildSignal(sessionId: SessionId, signal: BuildSignal): void;
   close(sessionId: SessionId): void;
 }
 
@@ -119,6 +126,16 @@ export interface OrchestratorOptions {
    * `claudeReview.riskFlags.enabled` config in. Off means no chips render.
    */
   riskFlagsEnabled?: boolean;
+  /**
+   * v0.5 (build signal): optional manager that runs the workspace's
+   * TypeScript compiler after each Stop and annotates each FileReview /
+   * HunkReview with the result. Absent ⇒ feature disabled / no-op
+   * (matches behaviour when `claudeReview.buildSignal.enabled = false`).
+   */
+  buildSignal?: {
+    start(sessionId: SessionId, review: SessionReview): void;
+    cancel(sessionId: SessionId): void;
+  };
 }
 
 export class ReviewOrchestrator {
@@ -685,6 +702,28 @@ export class ReviewOrchestrator {
 
   dismissSession(sessionId: string): void {
     const sid = asSessionId(sessionId);
+    // v0.5 (build signal): cancel any in-flight typecheck for this session
+    // BEFORE clearing state — keeps cleanup deterministic.
+    this.opts.buildSignal?.cancel(sid);
+    // v0.5.1 (LH1 — reliability hotfix): clear pending debounce timers BEFORE
+    // removing session state. Without this, a debounced Stop or reDiff fires
+    // AFTER the session is gone → re-enters openReview against a deleted
+    // session (ghost open) OR leaks the timer's closure (which retains file
+    // paths + FileReview refs preventing GC over long dev sessions).
+    const stopTimer = this.stopDebounce.get(sid);
+    if (stopTimer) {
+      clearTimeout(stopTimer);
+      this.stopDebounce.delete(sid);
+    }
+    // reDiffTimers is keyed `${sid}::${absPath}` — walk the whole map.
+    const prefix = `${sid}::`;
+    for (const key of Array.from(this.reDiffTimers.keys())) {
+      if (key.startsWith(prefix)) {
+        const t = this.reDiffTimers.get(key);
+        if (t) clearTimeout(t);
+        this.reDiffTimers.delete(key);
+      }
+    }
     this.opts.panel.close(sid);
     this.sessions.delete(sid);
     this.unindexSession(sid);
@@ -939,6 +978,15 @@ export class ReviewOrchestrator {
       sid, files: files.length, turnId: reconstructed.turnId,
     });
     this.notifyChange();
+
+    // v0.5.1 (LH13): fire a fresh build-signal run on Resume Review.
+    // Workspace state may have changed since the original turn; users
+    // expect "current state" semantics when reopening a closed session.
+    // (Relaxes locked decision L2 — which deferred Resume/save/manual
+    // triggers — for the Resume path specifically. save / manual are
+    // still deferred.)
+    this.opts.buildSignal?.start(sid, review);
+
     return review;
   }
 
@@ -1165,6 +1213,13 @@ export class ReviewOrchestrator {
       hunks: review.metrics.totalHunks,
     });
     this.notifyChange();
+
+    // v0.5 (build signal): kick off the typecheck runner. Fire-and-forget;
+    // the manager mutates `review.files[i].buildStatus` + `hunk.buildErrors`
+    // in place as results arrive, posting `file-updated` + `build-signal`
+    // messages through the panel gateway. Cancel hooks live in
+    // `dismissSession` and `handleStop` debounce.
+    this.opts.buildSignal?.start(sid, review);
 
     // Phase α Track 1: emit `turn-stopped` into the event log. We have
     // every file's full diff (hunks + before/after content) right here,
@@ -1943,25 +1998,10 @@ export function buildEditedHunk(original: StructuredHunk, editedAfter: string): 
   };
 }
 
-/**
- * v0.4 (A4): extract the hunk's current "after view" (context + `+` lines,
- * prefixes stripped, joined by '\n'). Used to pre-populate the edit textarea.
- *
- * Mirrors the substitution rule in `buildEditedHunk`: the after view is what
- * the patched file would contain at this hunk's range. Whether the file
- * uses LF or CRLF is irrelevant — `diff` normalises to LF when computing
- * hunks, and the renderer's fuzz-2 retry tolerates platform EOL drift.
- */
-export function extractHunkAfterView(h: StructuredHunk | HunkReview): string {
-  const out: string[] = [];
-  for (const line of h.lines) {
-    const tag = line.charAt(0);
-    if (tag === '+' || tag === ' ') {
-      out.push(line.slice(1));
-    }
-  }
-  return out.join('\n');
-}
+// v0.5.1 (LH5): `extractHunkAfterView` moved to `src/shared/hunkUtils.shared.ts`
+// so the webview can import the same implementation. Re-exported here for
+// host callers that previously imported from this module.
+export { extractHunkAfterView } from './shared/hunkUtils.shared.js';
 
 function uniqueWarnings<T extends string>(arr: T[]): T[] {
   return Array.from(new Set(arr));

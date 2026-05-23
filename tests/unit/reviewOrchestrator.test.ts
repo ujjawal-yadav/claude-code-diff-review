@@ -35,6 +35,7 @@ class FakePanel implements PanelGateway {
   undoDepths: number[] = [];
   postUndoStackDepth(_sid: SessionId, depth: number) { this.undoDepths.push(depth); }
   postRejectionDrafts(_sid: SessionId, _drafts: ReadonlyArray<{ filePath: string; relPath: string; hunkIdx: number; reason: string; ts: number }>) { void _drafts; }
+  postBuildSignal(_sid: SessionId, _signal: import('../../src/types.js').BuildSignal) { void _signal; }
   postSessionCompleted(sessionId: SessionId, metrics: SessionMetrics) { this.completed.push({ sessionId, metrics }); }
   close(sessionId: SessionId) { this.closed.push(sessionId); }
 }
