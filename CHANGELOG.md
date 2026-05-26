@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: Se
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.6.1] — 2026-05-26
+
 A performance + reliability pass (the "derive-once / ship-deltas" wave) from a 6-module optimization review. No new features; the app does the same work with less recomputation, less IPC, and fewer file reads — plus two correctness fixes.
 
 ### Fixed
