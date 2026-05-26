@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: Se
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.6.0] — 2026-05-26
+
 ### Added
 
 - **Insights tab in the History panel (A9).** Mines the event log accumulated across every review session to answer a question no other tool can: *where does Claude's work reliably land vs. reliably miss for you?* Four read-only views, computed over the last 30 days:
