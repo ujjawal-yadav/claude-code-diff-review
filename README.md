@@ -1,9 +1,5 @@
 # Claude Code Diff Review
 
-[![Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/UjjawalYadav.claude-code-diff-review?label=marketplace)](https://marketplace.visualstudio.com/items?itemName=UjjawalYadav.claude-code-diff-review)
-[![Marketplace Installs](https://img.shields.io/visual-studio-marketplace/i/UjjawalYadav.claude-code-diff-review)](https://marketplace.visualstudio.com/items?itemName=UjjawalYadav.claude-code-diff-review)
-[![Marketplace Rating](https://img.shields.io/visual-studio-marketplace/r/UjjawalYadav.claude-code-diff-review)](https://marketplace.visualstudio.com/items?itemName=UjjawalYadav.claude-code-diff-review&ssr=false#review-details)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 > Per-hunk review of every change Claude Code makes. Accept, reject, edit, or ask "why?" — with risk flags and a typecheck signal pointing you at what matters, without leaving VS Code and without touching git.
 
