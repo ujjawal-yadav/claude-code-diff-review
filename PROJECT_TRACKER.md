@@ -3,27 +3,59 @@
 
 ---
 
+## 🎯 Where we left off (2026-05-26)
+
+**Last action:** Built **v0.6.0 — A9 Insights tab** (in the History panel) end-to-end. Implemented, tested (15 new tests green), both bundles build clean. **Uncommitted** — no version bump / tag / push yet.
+
+**Two things sit uncommitted in the working tree:**
+- `webview/store.ts` — **v0.5.2** chat-error fix (`setChatError` clears `chatId` so the composer unlocks after a rate-limit/error; ships independently).
+- The v0.6 Insights feature (`src/insights/`, `src/types.ts`, `src/messages.ts`, `src/historyPanel.ts`, `webview/history/*`, tests, CHANGELOG `[Unreleased]`).
+
+**v0.6 was reprioritised (decision #149, amends #62/#63):** A9 Insights leads; **A7.5 multi-language build-signal + the E2 experiment are SHELVED** until a real Python/Rust/Go user asks. Per decision #58 — optimize for the actual primary user, not hypothetical adoption.
+
+**Current state:**
+- v0.5.1 (`00daf15`) is pushed (no unpushed commits).
+- Insights tests 15/15 green; typecheck (host + webview) clean; `npm run build` produces both bundles.
+- Full-suite parallel run is **flaky** (pre-existing Windows fs-cleanup/clock races — different orchestrator/history integration files fail per run, all pass in isolation). Not a v0.6 regression.
+
+**Next concrete step:** decide release shape (v0.5.2 chat fix + v0.6.0 Insights — separate tags or bundled), manual-E2E the Insights tab, then version-bump + tag + push. See plan file `~/.claude/plans/phase-alpha-immediate-md-new-cosmic-pearl.md` § "v0.6.0 Execution Plan".
+
+**Roadmap (locked):**
+- **v0.5.2** — chat-error composer-unlock fix (built, uncommitted).
+- **v0.6.0** — A9 Insights tab (built, uncommitted). A7.5 multi-language + E2 shelved on demand.
+- **v0.7 – v0.9** — Unallocated. Absorb deferred polish (#13 magic-number config, TooltipPopover everywhere, semantic A8) + patches.
+- **v1.0** — File-based token (Option C, validated by E1) + zero-config onboarding. Gated on Q-V1-1..6 smoke tests (1–2h spike).
+
+---
+
 ## 📊 Stats
 | Metric | Value |
+|---|---|
+| Last Updated | 2026-05-26 |
+| Current Version | **0.5.1** shipped; **v0.6.0 (Insights) + v0.5.2 (chat fix) built, uncommitted** |
+| Active Phase | **Decision-Support Pivot** (post-Phase β; v0.3 → v1.0 wave sequence) |
+| Latest Wave | v0.6.0 — A9 Insights tab in History panel (host-side aggregator over the event log) |
+| Tests Passing | **+15 new** insights tests green (full-suite parallel run flaky on pre-existing Windows fs races) |
+| Perf bench (Stop→init, 50 files) | median ~380 ms / p99 ~440 ms (budget 4500 ms) |
+| Memory leak (50 sessions) | ΔRSS ~−6 MB (budget 50 MB) |
+| Bundle Size (extension) | ~975 KB minified |
+| Bundle Size (webview) | ~367 KB JS + ~20 KB CSS |
+| Bundle Size (.vsix) | 5.03 MB (1056 files) |
+| Auth Methods | OAuth (Pro/Max) via env / SecretStorage / Claude Code's `.credentials.json`; API key fallback |
+| Shipped to marketplace | v0.2.x, v0.3.0, v0.3.1, v0.4.0 (v0.5.x pending push) |
+
+### Legacy stats (pre-v0.3 baseline, kept for delta context)
+| Metric | Value at 2026-05-18 |
 |---|---|
 | Total Phases | 11 |
 | Total Milestones | 17 |
 | Total Tasks | 112 |
 | Total Subtasks | 142 |
 | Completed Tasks | 70 |
-| In Progress | 1 (M10.1 β.0 Actionable History — sub-task 10.1.0 complete) |
+| In Progress | M10.1 β.0 Actionable History — sub-task 10.1.0 complete |
 | Completion | 68% |
-| Last Updated | 2026-05-18 02:50 |
-| Active Phase | Phase 10 — Phase β.0: Actionable History |
-| Active Milestone | M10.1 β.0 Bridge — 10.1.0 complete; next: 10.1.1 pure types |
 | Tests Passing | 237 / 237 (25 files) |
-| Tests Passing | 173 / 173 (17 files) |
-| Perf bench (post-optimisation) | median **363 ms** / p99 **461 ms** (was 630/814 — TRD §15 budget 1500) |
-| Perf bench (Stop→init, 50 files) | median 630 ms / p99 814 ms (budget 1500 ms) |
-| Memory leak (50 sessions) | ΔRSS ≈ 0 (budget 50 MB) |
-| Bundle Size (extension) | 1.3 MB minified (incl. Anthropic SDK) |
-| Bundle Size (webview) | 339 KB JS + 10.4 KB CSS |
-| Auth Methods | OAuth (Pro/Max) via env / SecretStorage / Claude Code's `.credentials.json`; API key fallback |
+| Perf bench (post-optimisation) | median **363 ms** / p99 **461 ms** (TRD §15 budget 1500) |
 
 ---
 
@@ -1629,3 +1661,114 @@ Other resolved (defaults adopted from spec recommendation, no new Deviation need
 2. Profile Resume Review on a session with ≥10 turns and ≥30 files — confirm the perceived improvement from parallel blob reads.
 3. Consider an explicit `claudeReview.cleanupHooks` command for users who want to trigger the legacy sweep without waiting for the next activation. Low priority since activation already does it.
 4. Index-write batching as a future perf slice if P99 climbs.
+
+---
+
+### Session (v0.3.0) — 2026-05-22 — Decision-Support Foundation
+**Summary:** First wave of the decision-support pivot. Risk-flag triage on files and hunks, keyboard-driven review, split-cell scrollbar fix.
+
+**Shipped:** v0.3.0 → marketplace + Open VSX (tag `v0.3.0`).
+
+**Completed:**
+- [x] **A1 — Risk flags:** heuristic file + hunk classification (sensitive-path, deletion, removed-error-handling, removed-null-check, large-hunk, lockfile, test-file). New module `src/riskFlagger.ts`; chips in FileList; badges on HunkBlock header; "N flagged" count in SessionHeader.
+- [x] **A2 — Keyboard nav:** `j`/`k`/`Shift+J`/`Shift+K`/`a`/`r`/`?`/`Space`/`Esc`/`Shift+/`. Pure `webview/utils/keyboardNav.ts` helpers; help overlay component.
+- [x] **A2.5 — Per-line scrollbar fix:** `.splitCell` `overflow-x: auto` → `overflow: hidden` with `title` tooltips on long lines.
+
+**Files Changed:** ~700 LOC across `src/types.ts`, `src/riskFlagger.ts` (new), `src/reviewOrchestrator.ts`, `webview/components/{FlagChip,FlagBadges,KeyboardShortcutsHelp,FileList,HunkBlock,SessionHeader}.tsx`, `webview/utils/keyboardNav.ts` (new), `webview/App.tsx`, `webview/store.ts`, `webview/styles/*.module.css`, 2 new test files.
+
+**Tests:** 409 / 409 (+51 new — risk-flag heuristics, keyboard-nav arithmetic).
+
+**Patch (v0.3.1) — 2026-05-22:** Fix macOS CI flake in `getPendingReviewsSummary` test — clock-precision boundary made `lastEventAt === cutoff` non-deterministic. Switched test to `withinMs: -1` for unambiguous exclusion.
+
+---
+
+### Session (v0.4.0) — 2026-05-22 — Edit + Reject-with-feedback + Rename grouping
+**Summary:** Closed two workflow gaps (the "third verb" for in-place editing, and the "rejection-reason capture" loop) plus cheap rename-aware grouping.
+
+**Shipped:** v0.4.0 → marketplace + Open VSX (tag `v0.4.0`).
+
+**Completed:**
+- [x] **A4 — Edit-before-accept:** New `'edited'` HunkStatus; `HunkSetState.editedHunks` substitution map preserves set-based determinism; `hunk-edited` event kind; full reconstruction round-trip. Re-editable (per-hunk undo restores Claude's original).
+- [x] **A5 — Reject-with-feedback:** `💬 Add reason` button after Reject; reasons accumulate in a collapsible drafts section inside ChatOverlay; "Send all to Claude" bundles into one consolidated prompt via existing chat surface. New `rejection-reason` event kind; drafts queue reconstructs on Resume.
+- [x] **A8 (cheap) — Rename grouping:** Heuristic clusters hunks sharing a single-identifier rename (≥3 members, ≥3 char tokens) into `(oldToken, newToken)` groups. `↻ rename · N more` chip on each member; inline panel with Accept all / Reject all bulk actions.
+- [x] **Polish:** show-flagged-only filter (file-level); wrap-long-lines toggle (split + unified diff); `claudeReview.crashRecoveryToast.enabled` default flipped to `false` (deprecation).
+
+**Files Changed:** ~1700 LOC across `src/types.ts`, `src/reviewOrchestrator.ts`, `src/chatService.ts`, `src/renameGrouper.ts` (new), `src/messages.ts`, `src/history/*` (2 new event kinds), `webview/components/{HunkBlock,ChatOverlay,InlineExpandingPanel (new),FileList,SessionHeader}.tsx`, 6 new test files.
+
+**Tests:** 439 / 439 (+30 new — edit round-trip, reason audit, rename groups, batch-feedback).
+
+---
+
+### Session (v0.5.0) — 2026-05-22 — TypeScript Build Signal
+**Summary:** **Headline decision-support feature.** After every Claude turn, the workspace's `tsc --noEmit` runs in parallel with panel-open; affected files + hunks are annotated and surface as banner / dot / inline badge. Closes the "did Claude break the build?" question without a manual run.
+
+**Status:** Packaged + ready to ship (committed `00daf15`, awaiting tag + push).
+
+**Completed:**
+- [x] **8 waves:** types + deps + config; tsc output parser (stream + one-shot); tsconfig resolver (composite/references detection); cross-spawn + tree-kill runner with AbortController + timeout; per-session lifecycle manager; orchestrator hooks (openReview / dismissSession); webview UI (banner, file dot, hunk badge, Shift+N / Shift+P nav); memory-leak guard; release prep.
+- [x] **E1 experiment confirmed (2026-05-21):** Claude Code re-reads `settings.json` per hook fire — unblocks file-based-token route for v1.0.
+
+**Files Changed:** ~1700 LOC across new `src/buildSignal/{tscParser,tsconfigResolver,tscRunner,buildSignalManager,intersectHunks}.ts`, new HostToWebview `build-signal` message kind, UI surfaces in HunkBlock/SessionHeader/FileList/App.tsx, 5 new test files.
+
+**Dependencies added:** `cross-spawn@^7.0.6`, `tree-kill@^1.2.2`, `string-argv@^0.3.2`, `@types/cross-spawn`. All MIT, all license-audit pre-approved.
+
+**Tests:** 506 / 506 (+67 new — parser, resolver, runner, intersect, manager lifecycle).
+
+**Decisions:** TS-only this wave (test runners deferred to v0.6 to bypass user `scripts.test` arbitrary-code hazard). After-Stop trigger only (Resume/save/manual deferred). Auto-detect tsconfig with `claudeReview.buildSignal.typecheckCommand` user override.
+
+---
+
+### Session (v0.5.1) — 2026-05-23 — Reliability + UX hotfix patch
+**Summary:** Three-agent senior-dev review of v0.3 / v0.4 / v0.5 produced 18 findings. 17 in-scope (1 deferred to v0.6). Single hotfix patch.
+
+**Status:** Packaged + ready to ship (committed `00daf15` together with v0.5.0).
+
+**Completed (6 waves):**
+- [x] **Wave 1 (P0 reliability):** `dismissSession` clears `stopDebounce` + `reDiffTimers` (latent leak back to v0.1); `tscRunner.finish()` idempotent guard + explicit stdout/stderr listener removal.
+- [x] **Wave 2 (P0):** Build-signal vs hunk-edit coord race fix — `BuildSignalManager.start()` captures per-file `{newStart, newLines}` snapshot; `intersectDiagnosticsWithHunks` consumes the snapshot. Honest semantic: results reflect file state at typecheck-time.
+- [x] **Wave 3 (P0):** `InlineExpandingPanel` Esc `stopPropagation` (fixes double-close); new `TooltipPopover` component (React portal, viewport-flip, hover+focus, max-width 480, pre-wrap) — integrated at HunkBlock build-errors + SessionHeader fatalStderr.
+- [x] **Wave 4 (P1):** `FileList` prop mutation removed; drafts duplication → minimal placeholder; `adoptReconstructed` fires `buildSignal.start` (Resume shows current build status); DIAG_RE 8 KB cap (adversarial-input safety); `React.memo` on SessionHeader (custom `areEqual`) + FileRow + HunkBlock — ~70% reduction in re-renders during typecheck-running window.
+- [x] **Wave 5 (P2 maintainability):** New `src/shared/` directory (`riskFlags.shared.ts`, `hunkUtils.shared.ts`) — eliminates host→webview import drift hazard; `TscRunResult.kind` discriminator replaces magic exitCode numbers; `BuildErrorRef.isProjectLevel?: true` replaces sentinel pattern; README "New in v0.5" section; WCAG contrast tweak on `.buildDotRunning`; tree-kill PID security audit comment.
+- [x] **Wave 6:** CHANGELOG `[0.5.1]` entry; `package.json` 0.5.0 → 0.5.1; `release:check` green; `.vsix` packaged.
+
+**Tests:** 513 / 513 (+7 new — timer-cleanup integration, coord-race integration, tscRunner double-fire + listener-removal unit).
+
+**Deferred to v0.6:** centralised config for magic numbers (`LARGE_HUNK_THRESHOLD`, `EDIT_BYTES_CAP`, `PROGRESS_THROTTLE_MS`, etc.) — needs telemetry first.
+
+**Files Changed:** ~280 LOC across `src/reviewOrchestrator.ts`, `src/buildSignal/{tscRunner,buildSignalManager,intersectHunks,tscParser}.ts`, `src/types.ts`, `src/riskFlagger.ts`, new `src/shared/{riskFlags,hunkUtils}.shared.ts`, `src/buildSignal/buildSignalManager.ts`, `webview/components/{TooltipPopover (new),InlineExpandingPanel,HunkBlock,SessionHeader,FileList,ChatOverlay,FlagChip}.tsx`, `README.md`, `CHANGELOG.md`, 2 new test files.
+
+**Next Session Should:**
+1. **Push:** `git push origin main && git tag v0.5.1 && git push origin v0.5.1` (triggers marketplace + Open VSX dual-publish via `release.yml`).
+2. **Monitor:** v0.5.1 marketplace listing within ~10 min; Day 0 / 3 / 7 user feedback per `docs/RELEASE.md`.
+3. **Run E2 experiment** (1–2h) — survey common project shapes (package.json scripts, tsconfig, Cargo, pyproject, go.mod) to settle the test-runner command-detection heuristic. Gates v0.6 spec.
+4. **Run V1 smoke tests** (Q-V1-1..6, 1–2h) — verify Claude Code's `type: "command"` hook support details on Windows. Gates v1.0 execution.
+5. After E2: write the detailed v0.6 execution plan (multi-language build-signal + Insights panel).
+
+---
+
+### Session (v0.6.0 — A9 Insights) — 2026-05-26 — Insights tab (BUILT, uncommitted)
+**Summary:** v0.6 **reprioritised** — A9 Insights leads; A7.5 multi-language build-signal + the E2 experiment **shelved** until a real non-TS user asks (per decision #58: optimize for the actual primary user, not hypothetical adoption). Insights tab built end-to-end and verified.
+
+**Status:** Implemented + tested + builds clean. **Uncommitted.** No version bump / tag / push yet (awaiting user go).
+
+**Completed (Waves 1–6 of the v0.6 plan):**
+- [x] **Wave 1 — types:** `InsightsReport` + `FileRate`/`SubagentRate`/`TrendBucket`/`RejectionReasonGroup` in `src/types.ts` (webview-importable; `exactOptionalPropertyTypes`-clean).
+- [x] **Wave 2 — aggregator:** new `src/insights/insightsAggregator.ts`. Pure `tallySession`/`buildReport`/`tallyInsights` (unit-testable) + `InsightsAggregator` I/O orchestrator. Raw-event scan via `readSessionStream` (NOT `reconstructSessionReview`); per-session memo keyed `sessionId:lastEventAt`. Undo-aware final-decision rates (resets via `scope` + `cascaded[]`); trend counts decision events by UTC day; `edited` its own terminal state; unattributed → `__main__` ("Main agent").
+- [x] **Wave 3 — protocol:** `load-insights` (in) + `insights-report` / `insights-error` (out) in `src/messages.ts`.
+- [x] **Wave 4 — host wiring:** `historyPanel.ts` — `load-insights` dispatch, lazy aggregator, gated 2 s-debounce live recompute (only after Insights tab opened), `insightsRefreshTimer` cleanup on dispose.
+- [x] **Wave 5 — webview:** new `webview/history/components/Insights.tsx` (4 sections, CSS bars, empty states, inline styles); tab bar + conditional render in `webview/history/App.tsx`; lazy request on first tab switch.
+- [x] **Wave 6 — tests:** `tests/unit/insightsAggregator.test.ts` (12) + `tests/integration/insightsAggregator.test.ts` (3) — all green.
+
+**Deferred:** Wave 7 (#13 magic-number centralisation) — orthogonal cross-codebase refactor; deferred to keep this change focused/revertable (decision #159). Wave 8 (release) — not run; awaiting user.
+
+**Tests:** new insights tests 15/15 green; typecheck (host + webview) clean; `npm run build` produces both bundles incl. history. NOTE: full-suite parallel run shows the **pre-existing** Windows fs-cleanup/clock flakes (different orchestrator/history integration files fail on each run; all pass in isolation) — not a regression from this additive work.
+
+**Files Changed:** `src/types.ts`, `src/messages.ts`, `src/historyPanel.ts`, new `src/insights/insightsAggregator.ts`, `webview/history/App.tsx`, new `webview/history/components/Insights.tsx`, `CHANGELOG.md` (`[Unreleased]`), 2 new test files. Plan appended to `~/.claude/plans/phase-alpha-immediate-md-new-cosmic-pearl.md` (§ v0.6.0).
+
+**Also pending (separate):** v0.5.2 chat-error fix (`webview/store.ts` — `setChatError` now clears `chatId` so the composer unlocks after a rate-limit/error). Uncommitted; ships independently.
+
+**Next Session Should:**
+1. Decide release shape: ship **v0.5.2** (chat fix) and **v0.6.0** (Insights) — separate tags, or bundle.
+2. `npm run release:check` (note the flaky full-suite; re-run or run integration files serially to get a clean pass).
+3. Manual E2E: open History → Insights tab → 4 sections render; run a turn + accept/reject → live recompute after ~2 s.
+4. Version bump + CHANGELOG promote `[Unreleased]` → `[0.6.0]` + tag + push.

@@ -165,6 +165,9 @@ export const HistoryWebviewToHost = z.discriminatedUnion('type', [
   z.object({ type: z.literal('resume-session'), sessionId: z.string() }),
   z.object({ type: z.literal('rollback-turn'), sessionId: z.string() }),
   z.object({ type: z.literal('delete-session'), sessionId: z.string() }),
+  // v0.6 (A9): request a cross-session insights report. `windowMs` optional
+  // (defaults to 30 days host-side). Sent on first switch to the Insights tab.
+  z.object({ type: z.literal('load-insights'), windowMs: z.number().int().positive().optional() }),
 ]);
 export type HistoryWebviewToHost = z.infer<typeof HistoryWebviewToHost>;
 
@@ -188,6 +191,7 @@ import type {
   TokenUsage,
   SessionMetrics,
   BuildSignal,
+  InsightsReport,
 } from './types.js';
 import type { HistoryEvent } from './history/historyEvents.js';
 import type { SessionIndexEntry } from './history/historyTypes.js';
@@ -204,7 +208,10 @@ export type HistoryHostToWebview =
       action: 'resume' | 'rollback' | 'delete';
       ok: boolean;
       error?: string;
-    };
+    }
+  // v0.6 (A9): computed insights report for the Insights tab, or an error.
+  | { type: 'insights-report'; report: InsightsReport }
+  | { type: 'insights-error'; message: string };
 
 export type HostToWebview =
   | { type: 'init'; session: SessionReview; viewType: 'split' | 'unified' }

@@ -2,6 +2,8 @@
 
 > Read this end-to-end before touching code. It's the single source for what this project is, how it works, why decisions were made, and what's deferred. Everything else (`PROJECT_TRACKER.md`, `CHANGELOG.md`, `docs/*`) is supporting detail; this doc is the entry point.
 
+> **2026-05-23 update — start with PROJECT_TRACKER.md's "Where we left off" banner first.** The architecture / threat-model / file-map sections below remain accurate for the v0.2.1 baseline. Deltas v0.3 → v0.5.1 are summarised in CHANGELOG.md and PROJECT_TRACKER.md's recent Session Log entries. The plan file `~/.claude/plans/phase-alpha-immediate-md-new-cosmic-pearl.md` is the canonical source for design decisions, locked resolutions, and the forward roadmap (v0.6 multi-language build-signal + Insights, v1.0 file-based token + zero-config onboarding).
+
 ---
 
 ## 1. Identity
@@ -14,9 +16,12 @@
 | **License** | MIT |
 | **Engines** | `vscode ^1.85.0`, `node >=18` |
 | **Stack** | TypeScript (strict + `exactOptionalPropertyTypes`), React 18 + Zustand (webview), Fastify (loopback server), Vitest |
-| **Current version** | 0.2.1 (packaged + tagged `v0.2.1` locally; not yet pushed at time of this writing) |
-| **Test count** | 343–345 passing |
-| **Bundle** | `dist/extension.js` ~940 KB (Node CJS), `dist/webview/index.js` ~348 KB (IIFE, chrome108) |
+| **Current version** | **0.5.1** (committed `00daf15` locally as combined v0.5.0 + v0.5.1; tag + push pending). Shipped to marketplace: v0.2.x, v0.3.0, v0.3.1, v0.4.0. |
+| **Test count** | **513 / 513** passing (51 files) |
+| **Bundle** | `dist/extension.js` ~975 KB (Node CJS), `dist/webview/index.js` ~367 KB (IIFE, chrome108); `.vsix` ~5.03 MB |
+| **Runtime deps added since v0.2.1** | `cross-spawn@^7.0.6`, `tree-kill@^1.2.2`, `string-argv@^0.3.2` (all v0.5; MIT; license-audit pre-approved) |
+| **Major features added since v0.2.1** | Risk flags + keyboard nav (v0.3) · Edit-before-accept + reject-with-feedback drafts + rename grouping (v0.4) · TypeScript build signal (v0.5) · Reliability + UX hotfix (v0.5.1). See CHANGELOG.md `[0.3.0]`–`[0.5.1]` entries. |
+| **New top-level dirs since v0.2.1** | `src/buildSignal/` (v0.5 — 5 modules), `src/shared/` (v0.5.1 — 2 cross-bundle modules), `webview/components/{TooltipPopover,InlineExpandingPanel}.tsx` (v0.5.1, v0.4 respectively) |
 
 ---
 

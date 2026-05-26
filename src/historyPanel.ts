@@ -16,6 +16,7 @@ import type { Logger } from './logger.js';
 import type { ReviewOrchestrator } from './reviewOrchestrator.js';
 import type { ReviewPanelManager } from './reviewPanel.js';
 import type { PendingStatusBar } from './pendingStatusBar.js';
+import { InsightsAggregator } from './insights/insightsAggregator.js';
 import {
   HistoryHostToWebview,
   parseHistoryWebviewMessage,
@@ -47,6 +48,11 @@ export interface HistoryPanelOptions {
   pendingStatusBar?: PendingStatusBar;
   /** Defaults to a vscode modal warning. Tests inject a stub. */
   confirmDestructive?: ConfirmDestructive;
+  /**
+   * v0.6 (A9): test-injectable insights aggregator. When absent, one is
+   * lazily constructed from `history` + `logger` on first `load-insights`.
+   */
+  insightsAggregator?: InsightsAggregator;
 }
 
 interface PanelState {
@@ -64,6 +70,14 @@ interface PanelState {
    * dispose so a refresh can't fire against a torn-down panel.
    */
   refreshTimer?: NodeJS.Timeout;
+  /**
+   * v0.6 (A9): true once the user has opened the Insights tab at least once.
+   * Gates the (heavier) live insights recompute so it never runs for users
+   * who only browse the session list.
+   */
+  insightsRequested: boolean;
+  /** Trailing-edge debounce timer for live insights recompute. */
+  insightsRefreshTimer?: NodeJS.Timeout;
 }
 
 export class HistoryPanelManager {
@@ -77,7 +91,19 @@ export class HistoryPanelManager {
    */
   private static readonly LIST_REFRESH_DEBOUNCE_MS = 300;
 
-  constructor(private readonly opts: HistoryPanelOptions) {}
+  /**
+   * v0.6 (A9): insights recompute debounce. Deliberately longer than the
+   * session-list refresh — insights scans many sessions, and the user does
+   * not need sub-second freshness on aggregate analytics.
+   */
+  private static readonly INSIGHTS_REFRESH_DEBOUNCE_MS = 2000;
+
+  /** Lazily constructed on first `load-insights` when not injected. */
+  private aggregator: InsightsAggregator | undefined;
+
+  constructor(private readonly opts: HistoryPanelOptions) {
+    this.aggregator = opts.insightsAggregator;
+  }
 
   async openOrFocus(): Promise<void> {
     if (this.panel) {
@@ -103,14 +129,19 @@ export class HistoryPanelManager {
       pending: [],
       flushScheduled: false,
       ready: false,
+      insightsRequested: false,
     };
     this.panel = state;
 
     // Live-update subscription: any record* write on the HistoryService
     // schedules a debounced re-post of the session list. Stored on state so
     // disposal can drop it cleanly (preventing leaks across panel reopens).
+    // v0.6: also schedule an insights recompute, but only once the user has
+    // opened the Insights tab (gated on insightsRequested) and on a longer
+    // debounce so analytics don't churn on every burst write.
     state.unsubscribe = this.opts.history.addChangeListener(() => {
       this.scheduleSessionListRefresh();
+      if (this.panel?.insightsRequested) this.scheduleInsightsRecompute();
     });
 
     wp.webview.html = this.renderHtml(wp.webview);
@@ -131,6 +162,7 @@ export class HistoryPanelManager {
     wp.onDidDispose(
       () => {
         if (state.refreshTimer) clearTimeout(state.refreshTimer);
+        if (state.insightsRefreshTimer) clearTimeout(state.insightsRefreshTimer);
         state.unsubscribe?.();
         this.panel = undefined;
       },
@@ -180,7 +212,41 @@ export class HistoryPanelManager {
       case 'delete-session':
         await this.handleDelete(msg.sessionId);
         return;
+      case 'load-insights':
+        if (this.panel) this.panel.insightsRequested = true;
+        await this.handleLoadInsights(msg.windowMs);
+        return;
     }
+  }
+
+  /**
+   * v0.6 (A9): compute the cross-session insights report and post it. Lazily
+   * constructs the aggregator on first use (unless one was injected for tests).
+   * The aggregator's per-session memo means repeated computes only rescan
+   * sessions whose `lastEventAt` changed.
+   */
+  private async handleLoadInsights(windowMs?: number): Promise<void> {
+    try {
+      const aggregator = this.getAggregator();
+      const report = await aggregator.compute(
+        windowMs !== undefined ? { windowMs } : undefined,
+      );
+      this.post({ type: 'insights-report', report });
+    } catch (err) {
+      const message = (err as Error).message;
+      this.opts.logger.warn('historyPanel', 'insights.failed', { err: message });
+      this.post({ type: 'insights-error', message });
+    }
+  }
+
+  private getAggregator(): InsightsAggregator {
+    if (!this.aggregator) {
+      this.aggregator = new InsightsAggregator({
+        history: this.opts.history,
+        logger: this.opts.logger,
+      });
+    }
+    return this.aggregator;
   }
 
   /**
@@ -300,6 +366,24 @@ export class HistoryPanelManager {
         this.opts.logger.warn('historyPanel', 'liveRefresh.failed', { err: String(err) });
       }
     }, HistoryPanelManager.LIST_REFRESH_DEBOUNCE_MS);
+  }
+
+  /**
+   * v0.6 (A9): trailing-edge debounce for live insights recompute. Only armed
+   * after the user has opened the Insights tab (caller gates on
+   * `insightsRequested`). Recomputes and posts a fresh report; the aggregator's
+   * memo keeps the cost to rescanning only changed sessions.
+   */
+  private scheduleInsightsRecompute(): void {
+    const state = this.panel;
+    if (!state) return;
+    if (state.insightsRefreshTimer) return;
+    state.insightsRefreshTimer = setTimeout(() => {
+      const s = this.panel;
+      if (s) delete s.insightsRefreshTimer;
+      if (!this.panel) return;
+      void this.handleLoadInsights();
+    }, HistoryPanelManager.INSIGHTS_REFRESH_DEBOUNCE_MS);
   }
 
   private post(msg: HistoryHostToWebview): void {

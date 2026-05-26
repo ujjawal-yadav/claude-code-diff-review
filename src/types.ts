@@ -376,3 +376,80 @@ export type RenderResult =
   | { ok: true; content: string }
   | { ok: false; reason: 'set-conflict'; conflictingHunks: number[] }
   | { ok: false; reason: 'snapshot-binary' };
+
+// --------------------------------------------------------------------------
+// v0.6 (A9 — Insights): cross-session analytics mined from the event log.
+//
+// Host-computed, webview-rendered. The aggregator (src/insights/) produces
+// an `InsightsReport`; the History panel's Insights tab renders it. These
+// shapes live in `src/types.ts` (not `src/history/*`) because the webview
+// can only `import type` from `src/types` / `src/messages`.
+//
+// exactOptionalPropertyTypes-clean: no optional field carries `| undefined`.
+// --------------------------------------------------------------------------
+
+/** Per-file accept/reject tally (final-decision state, undo-aware). */
+export interface FileRate {
+  /** Workspace-relative, forward-slash. */
+  path: string;
+  accepted: number;
+  rejected: number;
+  /** v0.4 (A4) edited hunks — excluded from `acceptRate` denominator. */
+  edited: number;
+  /** accepted / (accepted + rejected); 0 when the denominator is 0. */
+  acceptRate: number;
+}
+
+/** Per-sub-agent acceptance tally. */
+export interface SubagentRate {
+  /** `"__main__"` sentinel for unattributed / main-agent decisions. */
+  subagentId: string;
+  /** Display label — "Main agent" for the sentinel, else the Task description. */
+  label: string;
+  accepted: number;
+  rejected: number;
+  edited: number;
+  acceptRate: number;
+}
+
+/** One day in the rejection-rate trend. Counts decision *events* (activity). */
+export interface TrendBucket {
+  /** YYYY-MM-DD (UTC). */
+  day: string;
+  /** accepted + rejected decision events that day. */
+  decided: number;
+  rejected: number;
+  /** rejected / decided; 0 when decided is 0. */
+  rejectionRate: number;
+}
+
+/** A cluster of identical rejection reasons. */
+export interface RejectionReasonGroup {
+  /** Normalised reason text (trimmed; grouping key). */
+  reason: string;
+  count: number;
+  /** Up to `reasonSampleSize` example file paths. */
+  samplePaths: string[];
+}
+
+/** The complete analytics payload posted to the Insights tab. */
+export interface InsightsReport {
+  /** Epoch ms the report was computed (drives "as of" / staleness). */
+  computedAt: number;
+  /** Scan window in ms (default 30 days). */
+  windowMs: number;
+  /** Number of sessions scanned within the window. */
+  sessionsScanned: number;
+  /** Sorted desc by (accepted + rejected); denominator-0 files excluded. */
+  fileRates: FileRate[];
+  /** Includes the `"__main__"` bucket when present. */
+  subagentRates: SubagentRate[];
+  /** Exactly `trendDays` buckets, oldest→newest, zero-filled. */
+  trend: TrendBucket[];
+  reasons: {
+    total: number;
+    groups: RejectionReasonGroup[];
+  };
+  /** True when the entire scan produced zero decisions. */
+  empty: boolean;
+}

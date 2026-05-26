@@ -5,7 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: Se
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- **Insights tab in the History panel (A9).** Mines the event log accumulated across every review session to answer a question no other tool can: *where does Claude's work reliably land vs. reliably miss for you?* Four read-only views, computed over the last 30 days:
+  - **Per-file accept rate** — which files Claude edits well vs. badly (final-decision state, undo-aware).
+  - **Per-sub-agent acceptance** — acceptance broken down by Task sub-agent; unattributed/main-agent decisions bucket under "Main agent".
+  - **Rejection-rate trend** — a 30-day daily bar of how often you reject (review activity, not final state).
+  - **Rejection-reason mining** — recurring themes from the reasons you captured when rejecting (sparse until you've added a few; graceful empty state).
+  - Aggregation runs host-side (`src/insights/insightsAggregator.ts`) over the existing event log — **no new persistence, no schema changes**. Lazily computed on first tab open; live-refreshed (2 s debounce) only while the tab is open. Per-session memoisation means repeat computes only rescan sessions that changed.
+
+### Internal
+
+- Build signal's heavy `reconstructSessionReview` is deliberately **not** used by insights; the aggregator does a cheap raw-event scan via `readSessionStream` and reads only rejection-reason blobs.
+- New wire types in `src/types.ts` (`InsightsReport` + sub-shapes); new `load-insights` / `insights-report` / `insights-error` messages in `src/messages.ts`.
 
 ## [0.5.1] — 2026-05-23
 

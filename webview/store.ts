@@ -424,7 +424,11 @@ export const useUi = create<UiState>((set, get) => ({
   setChatError(chatId, error) {
     const chat = get().chat;
     if (!chat || chat.chatId !== chatId) return;
-    // Drop any partial streaming text; surface error to user.
-    set({ chat: { ...chat, streaming: null, error } });
+    // Drop any partial streaming text; surface error to user. Critically,
+    // clear `chatId` too — the stream is over, so the composer must unlock
+    // (the "Streaming…" lock keys off `chatId`). Without this the Send
+    // button stays frozen on "Streaming…" forever and the user cannot
+    // retry even after a transient error (rate-limit / network).
+    set({ chat: { ...chat, streaming: null, chatId: null, error } });
   },
 }));

@@ -2,9 +2,13 @@ import { useEffect, useMemo, useState } from 'react';
 import type { HistoryEvent } from '../../src/history/historyEvents.js';
 import type { SessionIndexEntry } from '../../src/history/historyTypes.js';
 import type { HistoryHostToWebview } from '../../src/messages.js';
+import type { InsightsReport } from '../../src/types.js';
 import { vscode } from './vscode.js';
 import { SessionList } from './components/SessionList.js';
 import { SessionDetail } from './components/SessionDetail.js';
+import { Insights } from './components/Insights.js';
+
+type Tab = 'sessions' | 'insights';
 
 export function App(): JSX.Element {
   const [sessions, setSessions] = useState<SessionIndexEntry[] | null>(null);
@@ -21,6 +25,13 @@ export function App(): JSX.Element {
    */
   const [inflight, setInflight] = useState<Record<string, 'resume' | 'rollback' | 'delete' | undefined>>({});
   const [actionError, setActionError] = useState<string | null>(null);
+
+  // v0.6 (A9): Insights tab. Lazily requested on first switch; refreshed
+  // unsolicited by the host's gated change-listener recompute.
+  const [tab, setTab] = useState<Tab>('sessions');
+  const [insights, setInsights] = useState<InsightsReport | null>(null);
+  const [insightsLoading, setInsightsLoading] = useState<boolean>(false);
+  const [insightsError, setInsightsError] = useState<string | null>(null);
 
   useEffect(() => {
     const handler = (e: MessageEvent<unknown>) => {
@@ -68,6 +79,15 @@ export function App(): JSX.Element {
             setActionError(null);
           }
           return;
+        case 'insights-report':
+          setInsights(msg.report);
+          setInsightsLoading(false);
+          setInsightsError(null);
+          return;
+        case 'insights-error':
+          setInsightsError(msg.message);
+          setInsightsLoading(false);
+          return;
       }
     };
     window.addEventListener('message', handler);
@@ -104,6 +124,18 @@ export function App(): JSX.Element {
     vscode.postMessage({ type: 'load-session', sessionId: sid });
   };
 
+  const switchTab = (next: Tab): void => {
+    if (next === tab) return;
+    setTab(next);
+    // Lazily request insights on the first switch; later switches reuse the
+    // cached report (live recompute arrives unsolicited from the host).
+    if (next === 'insights' && insights == null && !insightsLoading) {
+      setInsightsLoading(true);
+      setInsightsError(null);
+      vscode.postMessage({ type: 'load-insights' });
+    }
+  };
+
   return (
     <div style={styles.root}>
       <header style={styles.header}>
@@ -113,34 +145,60 @@ export function App(): JSX.Element {
           {historyRoot ? ` · ${historyRoot}` : ''}
         </span>
       </header>
+      <div style={styles.tabBar} role="tablist">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'sessions'}
+          style={tab === 'sessions' ? { ...styles.tab, ...styles.tabActive } : styles.tab}
+          onClick={() => switchTab('sessions')}
+        >
+          Sessions
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'insights'}
+          style={tab === 'insights' ? { ...styles.tab, ...styles.tabActive } : styles.tab}
+          onClick={() => switchTab('insights')}
+        >
+          Insights
+        </button>
+      </div>
       {error && <div style={styles.error}>{error}</div>}
       {actionError && <div style={styles.error}>{actionError}</div>}
-      <div style={styles.body}>
-        <aside style={styles.aside}>
-          <SessionList sessions={sessions} selectedId={selectedId} onSelect={onSelect} />
-        </aside>
+      {tab === 'sessions' ? (
+        <div style={styles.body}>
+          <aside style={styles.aside}>
+            <SessionList sessions={sessions} selectedId={selectedId} onSelect={onSelect} />
+          </aside>
+          <main style={styles.main}>
+            {selected == null ? (
+              <p style={styles.empty}>
+                {sessions == null
+                  ? 'Loading history…'
+                  : sessions.length === 0
+                    ? 'No Claude Code sessions recorded yet. Run a session — every turn lands in the event log.'
+                    : 'Select a session to inspect its turns.'}
+              </p>
+            ) : (
+              <SessionDetail
+                session={selected}
+                events={events}
+                loading={loading}
+                inflight={inflight[selected.sessionId]}
+                onResume={onResume}
+                onRollback={onRollback}
+                onDelete={onDelete}
+              />
+            )}
+          </main>
+        </div>
+      ) : (
         <main style={styles.main}>
-          {selected == null ? (
-            <p style={styles.empty}>
-              {sessions == null
-                ? 'Loading history…'
-                : sessions.length === 0
-                  ? 'No Claude Code sessions recorded yet. Run a session — every turn lands in the event log.'
-                  : 'Select a session to inspect its turns.'}
-            </p>
-          ) : (
-            <SessionDetail
-              session={selected}
-              events={events}
-              loading={loading}
-              inflight={inflight[selected.sessionId]}
-              onResume={onResume}
-              onRollback={onRollback}
-              onDelete={onDelete}
-            />
-          )}
+          <Insights report={insights} loading={insightsLoading} error={insightsError} />
         </main>
-      </div>
+      )}
     </div>
   );
 }
@@ -163,6 +221,26 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '0.25rem',
   },
   subtle: { color: 'var(--vscode-descriptionForeground)', fontSize: '0.85em' },
+  tabBar: {
+    display: 'flex',
+    gap: '2px',
+    padding: '0 1rem',
+    borderBottom: '1px solid var(--vscode-panel-border)',
+  },
+  tab: {
+    padding: '0.4rem 0.9rem',
+    border: 'none',
+    borderBottom: '2px solid transparent',
+    background: 'transparent',
+    color: 'var(--vscode-foreground)',
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    fontSize: 'inherit',
+  },
+  tabActive: {
+    borderBottom: '2px solid var(--vscode-focusBorder)',
+    color: 'var(--vscode-foreground)',
+  },
   body: { display: 'flex', flex: 1, minHeight: 0 },
   aside: {
     width: '280px',
