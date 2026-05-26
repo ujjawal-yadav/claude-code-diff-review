@@ -33,6 +33,16 @@ export interface SessionIndexEntry {
    * the cache stays correct without active invalidation everywhere.
    */
   pendingHunkCount?: number | null;
+  /**
+   * v0.6.1: cached total hunk count (sum of hunks across all turn-stopped
+   * events). Joins `pendingHunkCount` in the lazy cache so the status-bar
+   * summary's fast path returns BOTH counts with zero segment I/O — the
+   * previous "cached" path still streamed the whole session just to sum the
+   * total. Invalidated (set null) on turn-stopped (a new turn changes the
+   * cumulative total); NOT invalidated on hunk decisions (which change
+   * `pendingHunkCount` but never the produced-hunk total).
+   */
+  totalHunkCount?: number | null;
 }
 
 export interface HistoryIndex {

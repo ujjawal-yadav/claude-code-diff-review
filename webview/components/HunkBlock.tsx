@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef } from 'react';
-import type { HunkReview, SessionReview } from '../../src/types';
+import type { HunkReview } from '../../src/types';
 import { useUi } from '../store';
 import { send } from '../vscode';
 import { FlagBadges } from './FlagChip';
@@ -26,11 +26,17 @@ interface Props {
    */
   subagentId?: string;
   /**
-   * v0.4 (A8 cheap): full session, threaded down so the rename-group
-   * panel can resolve `renameGroups[groupId]` → member list. Optional
-   * to keep older test harnesses building; falls back to no group panel.
+   * v0.4 (A8 cheap): rename-group member lists, threaded down so the panel
+   * can resolve `renameGroups[groupId]`. Optional; falls back to no panel.
+   *
+   * v0.6.1: narrowed from the whole `SessionReview` to just `renameGroups`.
+   * The full-session prop minted a new reference on every `setBuildSignal`
+   * (3-5×/sec during a tsc run), which silently broke this component's own
+   * shallow-equal memo and re-rendered every hunk. `renameGroups` is
+   * reference-stable across decision/build-signal mutations, so the memo
+   * now actually holds.
    */
-  session?: SessionReview;
+  renameGroups?: Record<string, Array<{ filePath: string; hunkIndex: number }>>;
 }
 
 /**
@@ -51,7 +57,7 @@ interface Props {
  */
 export const HunkBlock = memo(HunkBlockImpl);
 
-function HunkBlockImpl({ filePath, hunk, viewType, selected, onSelect, subagentId, session }: Props): JSX.Element {
+function HunkBlockImpl({ filePath, hunk, viewType, selected, onSelect, subagentId, renameGroups }: Props): JSX.Element {
   const decided = hunk.status !== 'pending';
   const openChat = useUi((s) => s.openChat);
   const editMode = useUi((s) => s.editMode);
@@ -111,7 +117,7 @@ function HunkBlockImpl({ filePath, hunk, viewType, selected, onSelect, subagentI
           </TooltipPopover>
         )}
         {/* v0.4 (A8 cheap): rename-group chip. Click to expand the inline group panel. */}
-        {hunk.renameGroupId && session?.renameGroups?.[hunk.renameGroupId] && (
+        {hunk.renameGroupId && renameGroups?.[hunk.renameGroupId] && (
           <button
             type="button"
             className={styles.renameChip}
@@ -119,7 +125,7 @@ function HunkBlockImpl({ filePath, hunk, viewType, selected, onSelect, subagentI
             title={`Rename group: ${hunk.renameGroupId}`}
             aria-label={`Toggle rename group panel for ${hunk.renameGroupId}`}
           >
-            ↻ rename · {Math.max(0, (session.renameGroups[hunk.renameGroupId]?.length ?? 1) - 1)} more
+            ↻ rename · {Math.max(0, (renameGroups[hunk.renameGroupId]?.length ?? 1) - 1)} more
           </button>
         )}
         <div className={styles.actions} role="group" aria-label="Hunk actions">
@@ -223,14 +229,14 @@ function HunkBlockImpl({ filePath, hunk, viewType, selected, onSelect, subagentI
       )}
 
       {/* v0.4 (A8 cheap): inline rename-group panel. */}
-      {isGroupPanelOpen && hunk.renameGroupId && session?.renameGroups?.[hunk.renameGroupId] && (
+      {isGroupPanelOpen && hunk.renameGroupId && renameGroups?.[hunk.renameGroupId] && (
         <InlineExpandingPanel
           mode="info"
           onCancel={() => toggleRenameGroupPanel(filePath, hunk.index, false)}
         >
           <RenameGroupPanel
             groupId={hunk.renameGroupId}
-            members={session.renameGroups[hunk.renameGroupId]!}
+            members={renameGroups[hunk.renameGroupId]!}
             onClose={() => toggleRenameGroupPanel(filePath, hunk.index, false)}
           />
         </InlineExpandingPanel>

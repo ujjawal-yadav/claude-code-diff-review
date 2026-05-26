@@ -67,6 +67,52 @@ const SAMPLE = (overrides: Partial<{ ts: string; toolName: string; filePath: str
 // readTranscriptWindow
 // ---------------------------------------------------------------------------
 
+describe('readTranscriptWindow — tail bound (v0.6.1)', () => {
+  // Build a transcript larger than the 8 MB MAX_TRANSCRIPT_BYTES cap, with a
+  // distinct target tool_use at the HEAD (offset 0, truncated out by the tail
+  // read) and another at the very END (within the tail). Proves we read only
+  // the tail: the head target is NOT found; the tail target IS.
+  async function writeOversized(): Promise<string> {
+    const p = path.join(dir, 'big.jsonl');
+    const headTarget = JSON.stringify({
+      type: 'tool_use', tool_name: 'Edit',
+      tool_input: { file_path: '/work/HEAD.ts', old_string: 'a', new_string: 'b' },
+      timestamp: '2026-05-18T09:00:00.000Z',
+    });
+    // ~2 KB filler user lines; ~5000 of them ⇒ ~10 MB, so the head line sits
+    // beyond the last-8 MB window.
+    const filler = JSON.stringify({
+      type: 'user', message: { content: 'x'.repeat(2000) }, timestamp: '2026-05-18T09:30:00.000Z',
+    });
+    const tailUser = JSON.stringify({
+      type: 'user', message: { content: 'fix the tail bug' }, timestamp: '2026-05-18T10:00:00.000Z',
+    });
+    const tailTarget = JSON.stringify({
+      type: 'tool_use', tool_name: 'Edit',
+      tool_input: { file_path: '/work/TAIL.ts', old_string: 'a', new_string: 'b' },
+      timestamp: '2026-05-18T10:00:01.000Z',
+    });
+    const lines = [headTarget];
+    for (let i = 0; i < 5000; i++) lines.push(filler);
+    lines.push(tailUser, tailTarget);
+    await fs.writeFile(p, lines.join('\n') + '\n', 'utf8');
+    return p;
+  }
+
+  it('finds a target near EOF in an oversized transcript', async () => {
+    const p = await writeOversized();
+    const w = await readTranscriptWindow(p, { filePath: '/work/TAIL.ts' });
+    expect(w.userPrompt).toBe('fix the tail bug');
+  });
+
+  it('does NOT find a target truncated out of the head (tail-only read)', async () => {
+    const p = await writeOversized();
+    const w = await readTranscriptWindow(p, { filePath: '/work/HEAD.ts' });
+    expect(w.userPrompt).toBeNull();
+    expect(w.precedingToolCalls).toEqual([]);
+  });
+});
+
 describe('readTranscriptWindow', () => {
   it('returns empty window when file does not exist', async () => {
     const w = await readTranscriptWindow('/no/such/file.jsonl', { filePath: '/x' });

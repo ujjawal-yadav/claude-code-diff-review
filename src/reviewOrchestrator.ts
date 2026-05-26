@@ -310,7 +310,7 @@ export class ReviewOrchestrator {
       hunk.status = action === 'accept' ? 'accepted' : 'rejected';
       hunk.decidedAt = Date.now();
       file.status = recomputeFileStatus(file.hunks);
-      review.metrics = recomputeMetrics(review.files);
+      review.metrics = recomputeMetrics(review.files, review.metrics.bytesSnapshotted);
       this.opts.panel.postHunkApplied(sid, absFile, hunkIndex, hunk.status);
       this.pushUndoSnapshot(sid, snapshot);
       this.notifyChange();
@@ -391,7 +391,7 @@ export class ReviewOrchestrator {
       }
     })));
 
-    review.metrics = recomputeMetrics(review.files);
+    review.metrics = recomputeMetrics(review.files, review.metrics.bytesSnapshotted);
     // Option A: push the bulk snapshot only if the action actually changed
     // something. Avoids "Undo" entries for no-op bulks (e.g., accept-all
     // when nothing was pending).
@@ -465,7 +465,7 @@ export class ReviewOrchestrator {
       hunk.status = 'pending';
       delete hunk.decidedAt;
       file.status = recomputeFileStatus(file.hunks);
-      review.metrics = recomputeMetrics(review.files);
+      review.metrics = recomputeMetrics(review.files, review.metrics.bytesSnapshotted);
       this.opts.panel.postHunkApplied(sid, absFile, hunkIndex, hunk.status);
       this.pushUndoSnapshot(sid, snapshot);
       this.notifyChange();
@@ -568,7 +568,7 @@ export class ReviewOrchestrator {
       hunk.newLines = newHunk.newLines;
       hunk.lines = newHunk.lines.slice();
       file.status = recomputeFileStatus(file.hunks);
-      review.metrics = recomputeMetrics(review.files);
+      review.metrics = recomputeMetrics(review.files, review.metrics.bytesSnapshotted);
       this.opts.panel.postHunkApplied(sid, absFile, hunkIndex, 'edited');
       // The hunk shape changed — push a full file-updated so the webview
       // re-renders with the substituted `+` block.
@@ -777,7 +777,7 @@ export class ReviewOrchestrator {
         if (h.decidedAt == null) h.decidedAt = now;
       }
       file.status = recomputeFileStatus(file.hunks);
-      review.metrics = recomputeMetrics(review.files);
+      review.metrics = recomputeMetrics(review.files, review.metrics.bytesSnapshotted);
       this.opts.panel.postFileUpdated(sid, absFile, file);
       this.pushUndoSnapshot(sid, snapshot);
       this.opts.logger.info('orchestrator', 'file.snapshot-reverted', { file: absFile });
@@ -1093,6 +1093,15 @@ export class ReviewOrchestrator {
       return;
     }
 
+    // v0.6.1: index the prior session's files by path ONCE (was an O(files)
+    // Array.find per new file → O(files²) — the only superlinear lookup on
+    // this path). Reused below both to carry risk flags for unchanged hunks
+    // and to preserve prior decisions (Bug B status merge).
+    const priorSession = this.sessions.get(sid);
+    const priorByPath = priorSession
+      ? new Map(priorSession.files.map((f) => [f.filePath, f]))
+      : null;
+
     const files: FileReview[] = [];
     for (const absPath of sessionData.touched) {
       const before = sessionData.originals.get(absPath) ?? '';
@@ -1129,9 +1138,19 @@ export class ReviewOrchestrator {
       if (this.opts.riskFlagsEnabled) {
         const fileFlags = flagFile(fr);
         if (fileFlags.length > 0) fr.flags = fileFlags;
+        // v0.6.1: on a continuation Stop, a hunk byte-identical to the prior
+        // turn's hunk has an identical flag result — carry it instead of
+        // re-running the per-line `flagHunk` regex scan. Identical content ⇒
+        // identical flags, so a prior hunk with no flags correctly yields none.
+        const priorFile = priorByPath?.get(fr.filePath);
         for (const h of fr.hunks) {
-          const hunkFlags = flagHunk(h);
-          if (hunkFlags.length > 0) h.flags = hunkFlags;
+          const priorH = priorFile?.hunks[h.index];
+          if (priorH && hunksAlignedShallow(priorH, h)) {
+            if (priorH.flags !== undefined) h.flags = priorH.flags;
+          } else {
+            const hunkFlags = flagHunk(h);
+            if (hunkFlags.length > 0) h.flags = hunkFlags;
+          }
         }
       }
       files.push(fr);
@@ -1144,10 +1163,9 @@ export class ReviewOrchestrator {
     // (`hunksAlignedShallow` at the bottom of this file). Without this,
     // every continuation Stop wipes the user's prior accept/reject in
     // the live panel.
-    const priorSession = this.sessions.get(sid);
     if (priorSession) {
       for (const newFile of files) {
-        const priorFile = priorSession.files.find((p) => p.filePath === newFile.filePath);
+        const priorFile = priorByPath?.get(newFile.filePath);
         if (!priorFile) continue;
         newFile.hunks = newFile.hunks.map((h) => {
           const priorH = priorFile.hunks[h.index];
@@ -1684,7 +1702,7 @@ export class ReviewOrchestrator {
       });
     }
 
-    review.metrics = recomputeMetrics(review.files);
+    review.metrics = recomputeMetrics(review.files, review.metrics.bytesSnapshotted);
     this.notifyChange();
     this.emitUndoStackDepth(sid);
 
@@ -1908,10 +1926,16 @@ function recomputeFileStatus(hunks: HunkReview[]): FileStatus {
   return 'accepted';
 }
 
-function recomputeMetrics(files: FileReview[]): SessionMetrics {
-  let total = 0, accepted = 0, rejected = 0, bytes = 0;
+function recomputeMetrics(files: FileReview[], cachedBytes?: number): SessionMetrics {
+  let total = 0, accepted = 0, rejected = 0;
+  // v0.6.1: `bytesSnapshotted` depends only on each file's immutable `before`,
+  // so it's computed once at openReview and threaded back on every subsequent
+  // recompute (accept/reject/edit/undo) — avoids re-UTF-8-encoding the whole
+  // snapshot (~177 KB on a 50-file session) on every single click.
+  const computeBytes = cachedBytes === undefined;
+  let bytes = cachedBytes ?? 0;
   for (const f of files) {
-    bytes += Buffer.byteLength(f.before, 'utf8');
+    if (computeBytes) bytes += Buffer.byteLength(f.before, 'utf8');
     for (const h of f.hunks) {
       total++;
       if (h.status === 'accepted') accepted++;

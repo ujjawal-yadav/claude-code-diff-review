@@ -75,6 +75,8 @@ interface ConvKey {
 }
 
 const FLUSH_TICK_MS = 16; // ~60 fps
+/** v0.6.1: max time transcript enrichment may delay the first chat token. */
+const TRANSCRIPT_READ_TIMEOUT_MS = 1500;
 
 export class ChatService {
   private readonly conversations = new Map<string, ConversationEntry[]>();
@@ -152,11 +154,30 @@ export class ChatService {
       try {
         const transcriptPath = this.deps.adapter.resolveTranscriptPath(args.sessionId, review.cwd);
         if (transcriptPath) {
-          const window = await readTranscriptWindow(transcriptPath, {
-            filePath: args.filePath,
-            logger: this.deps.logger,
+          // v0.6.1: cap how long transcript enrichment can delay the first
+          // token. The reader already tail-bounds the bytes it reads; this
+          // wall-clock race is belt-and-braces — on a slow/huge read we drop
+          // to hunk-only rather than stall the stream (the chat-hang class).
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const timeoutP = new Promise<null>((resolve) => {
+            timer = setTimeout(() => resolve(null), TRANSCRIPT_READ_TIMEOUT_MS);
           });
-          userMessage = composeUserMessageWithTranscript(window, args.message);
+          try {
+            const window = await Promise.race([
+              readTranscriptWindow(transcriptPath, {
+                filePath: args.filePath,
+                logger: this.deps.logger,
+              }),
+              timeoutP,
+            ]);
+            if (window) {
+              userMessage = composeUserMessageWithTranscript(window, args.message);
+            } else {
+              this.deps.logger.debug('chat', 'transcript.read.timeout', { ms: TRANSCRIPT_READ_TIMEOUT_MS });
+            }
+          } finally {
+            if (timer) clearTimeout(timer);
+          }
         }
       } catch (err) {
         this.deps.logger.debug('chat', 'transcript.read.failed', { err: String(err) });

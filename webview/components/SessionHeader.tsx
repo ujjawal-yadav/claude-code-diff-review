@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useMemo } from 'react';
 import type { SessionReview } from '../../src/types';
 import { useUi } from '../store';
 import { send } from '../vscode';
@@ -52,9 +52,16 @@ function SessionHeaderImpl({ session, viewType, banner }: Props): JSX.Element {
     : 0;
   // v0.3: count hunks that carry at least one risk flag — surfaces as a
   // prioritisation hint in the header meta row.
-  const flaggedCount = session.files.reduce(
-    (acc, f) => acc + f.hunks.filter((h) => (h.flags?.length ?? 0) > 0).length,
-    0,
+  // v0.6.1: memoised on `session.files` so the O(files×hunks) reduce doesn't
+  // re-run on every build-signal-only re-render during a tsc run (the header's
+  // areEqual lets buildSignal-only changes through, but flaggedCount depends
+  // solely on files).
+  const flaggedCount = useMemo(
+    () => session.files.reduce(
+      (acc, f) => acc + f.hunks.filter((h) => (h.flags?.length ?? 0) > 0).length,
+      0,
+    ),
+    [session.files],
   );
   return (
     <header className={styles.root} role="banner">

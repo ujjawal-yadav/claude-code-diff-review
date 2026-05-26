@@ -35,6 +35,14 @@ export interface BlobStoreOptions {
 
 export class BlobStore {
   private readonly blobsDir: string;
+  /**
+   * v0.6.1: in-process set of SHAs we've already persisted this session, to
+   * short-circuit the dedup without a filesystem probe. Bounded by the number
+   * of distinct blobs written in a session (turn before/after content); each
+   * entry is a 64-char hex string. Not a correctness store — purely a syscall
+   * cache; cross-process duplicates are still handled by the rename race path.
+   */
+  private readonly knownShas = new Set<string>();
 
   constructor(opts: BlobStoreOptions) {
     this.blobsDir = path.join(opts.root, 'blobs');
@@ -49,8 +57,13 @@ export class BlobStore {
    */
   async write(content: string): Promise<string> {
     const sha = sha256Hex(content);
+    // v0.6.1: in-process dedup. The previous `exists()` stat ran on EVERY
+    // write but almost always missed (most turn blobs are novel content), so
+    // it was a wasted syscall on the hot write path. We skip it: known SHAs
+    // short-circuit here, and novel SHAs go straight to write+rename. The
+    // rename-race handler below still covers the cross-process duplicate case.
+    if (this.knownShas.has(sha)) return sha;
     const target = this.pathFor(sha);
-    if (await this.exists(target)) return sha;
 
     await fs.mkdir(path.dirname(target), { recursive: true });
     const tmp = `${target}.${crypto.randomBytes(6).toString('hex')}.tmp`;
@@ -58,16 +71,18 @@ export class BlobStore {
     try {
       await fs.rename(tmp, target);
     } catch (err) {
-      // Race: another writer landed the same blob between our `has` check
-      // and our rename. Verify the existing file's hash matches and clean
-      // up our tmp. If anything looks wrong, surface — never silently swap
-      // content under an SHA.
+      // Race: another writer (or process) landed the same blob. Blobs are
+      // content-addressed so the existing file's content is identical; clean
+      // up our tmp and treat as success. If the target genuinely isn't there,
+      // surface the error — never silently lose a write.
       if (await this.exists(target)) {
         await fs.unlink(tmp).catch(() => undefined);
+        this.knownShas.add(sha);
         return sha;
       }
       throw err;
     }
+    this.knownShas.add(sha);
     return sha;
   }
 

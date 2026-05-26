@@ -37,6 +37,20 @@ interface PanelEntry {
    * message silently.
    */
   webviewReady: boolean;
+  /**
+   * v0.6.1: the SessionReview reference last sent via `init`. On a focus/
+   * reveal of an already-open panel we skip re-posting the full review when
+   * this matches (in-place field changes ride on `file-updated`). The
+   * orchestrator mints a new SessionReview object on each real rebuild
+   * (openReview / adopt), so a changed reference correctly forces re-init.
+   */
+  lastSessionRef?: SessionReview;
+  /**
+   * v0.6.1: per-panel event subscriptions, disposed in `onDispose` instead of
+   * being parked in `context.subscriptions` (which never released them until
+   * extension deactivate — a leak of 2 closures per open/close cycle).
+   */
+  disposables: vscode.Disposable[];
 }
 
 export interface ReviewPanelOptions {
@@ -70,6 +84,14 @@ export class ReviewPanelManager implements PanelGateway {
     const existing = this.panels.get(session.sessionId);
     if (existing) {
       existing.panel.reveal(undefined, true);
+      // v0.6.1: if the webview already holds this exact SessionReview
+      // reference, a plain focus/reveal (command palette, resume-focus-
+      // existing) does NOT need to re-serialize the full review — in-place
+      // field changes were already pushed via `file-updated`. Skip the
+      // large structured-clone. A genuine rebuild gives a new reference and
+      // falls through to re-init below.
+      if (existing.lastSessionRef === session) return;
+      existing.lastSessionRef = session;
       // Drop any stale queued messages — the new init supersedes them.
       // The flush will pick up only what's relevant for the current state.
       existing.pendingPosts.length = 0;
@@ -93,21 +115,24 @@ export class ReviewPanelManager implements PanelGateway {
       },
     );
 
-    const entry: PanelEntry = { panel, pendingPosts: [], flushScheduled: false, webviewReady: false };
+    const entry: PanelEntry = {
+      panel,
+      pendingPosts: [],
+      flushScheduled: false,
+      webviewReady: false,
+      lastSessionRef: session,
+      disposables: [],
+    };
     this.panels.set(session.sessionId, entry);
 
     panel.webview.html = this.renderHtml(panel.webview);
 
-    panel.webview.onDidReceiveMessage(
-      (raw) => this.onMessage(session.sessionId, raw),
-      undefined,
-      this.opts.context.subscriptions,
-    );
-
-    panel.onDidDispose(
-      () => this.onDispose(session.sessionId),
-      undefined,
-      this.opts.context.subscriptions,
+    // v0.6.1: capture these subscriptions on the entry and dispose them in
+    // `onDispose` rather than parking them in `context.subscriptions` (which
+    // retained them until extension deactivate — a per-cycle leak).
+    entry.disposables.push(
+      panel.webview.onDidReceiveMessage((raw) => this.onMessage(session.sessionId, raw)),
+      panel.onDidDispose(() => this.onDispose(session.sessionId)),
     );
 
     // Send init after the webview has signalled `ready` (see onMessage),
@@ -201,7 +226,7 @@ export class ReviewPanelManager implements PanelGateway {
     entry.flushScheduled = true;
     setImmediate(() => {
       entry.flushScheduled = false;
-      const batch = entry.pendingPosts.splice(0);
+      const batch = collapseFileUpdates(entry.pendingPosts.splice(0));
       for (const msg of batch) {
         try { entry.panel.webview.postMessage(msg); }
         catch (err) { this.opts.logger.warn('panel', 'post.failed', { err: String(err) }); }
@@ -345,10 +370,15 @@ export class ReviewPanelManager implements PanelGateway {
   }
 
   private onDispose(sessionId: SessionId): void {
+    const entry = this.panels.get(sessionId);
     this.panels.delete(sessionId);
     this.opts.logger.info('panel', 'disposed', { sessionId });
     this.chatService?.cancelSession(sessionId);
     this.orchestrator?.dismissSession(sessionId);
+    // v0.6.1: release the per-panel listeners so they don't accumulate in
+    // memory across open/close cycles. Disposing the onDidDispose sub from
+    // within its own callback is a safe no-op.
+    if (entry) for (const d of entry.disposables) d.dispose();
   }
 
 
@@ -383,6 +413,28 @@ export class ReviewPanelManager implements PanelGateway {
 </body>
 </html>`;
   }
+}
+
+/**
+ * v0.6.1: within one flush batch, a burst of N hunk actions on the same file
+ * enqueues N full `FileReview` snapshots. Only the last is authoritative (each
+ * carries the complete file state), so collapse earlier `file-updated` for the
+ * same path — keeping the last at its original position and preserving the
+ * order of all other messages. A single-file 20-hunk accept-all goes from 20
+ * full-FileReview clones over IPC to 1.
+ */
+function collapseFileUpdates(batch: HostToWebview[]): HostToWebview[] {
+  const lastIdx = new Map<string, number>();
+  let fileUpdatedCount = 0;
+  batch.forEach((m, i) => {
+    if (m.type === 'file-updated') {
+      lastIdx.set(m.filePath, i);
+      fileUpdatedCount++;
+    }
+  });
+  // Common path: at most one file-updated per path → nothing to collapse.
+  if (fileUpdatedCount === lastIdx.size) return batch;
+  return batch.filter((m, i) => m.type !== 'file-updated' || lastIdx.get(m.filePath) === i);
 }
 
 function titleFor(session: SessionReview): string {

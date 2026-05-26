@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -62,20 +63,21 @@ export class ClaudeCodeAdapter implements AgentAdapter {
    * subsequent calls binary-search the cache. Cleared by
    * `clearSubagentCache(sessionId)` when the session ends.
    *
-   * `null` value means "we tried to load and the transcript didn't exist or
-   * contained no Task entries" — caching the negative result avoids
-   * repeated I/O on every PreToolUse in a session that has no sub-agents.
-   *
-   * Bug E fix: the value can also be an in-flight `Promise<...>`. Concurrent
-   * `extractSubagentId` calls for the same session pre-cache the Promise,
-   * so subsequent callers `await` the SAME read instead of kicking off a
-   * second `readTaskEntries`. Resolves to the array or null, then the
-   * cache entry is replaced with the resolved value.
+   * v0.6.1: each entry records the transcript's `mtimeMs` at read time. On the
+   * next call we `stat` the transcript (one cheap syscall) and re-read only if
+   * the mtime advanced — so a sub-agent (Task) spawned MID-session is picked up
+   * instead of being permanently mis-attributed to the main agent (the prior
+   * cache never refreshed once set, incl. a sticky negative `null`). `tasks ===
+   * null` still means "no transcript / no Task entries" for that mtime.
    */
-  private readonly taskCache = new Map<
-    string,
-    ReadonlyArray<TaskEntry> | null | Promise<ReadonlyArray<TaskEntry> | null>
-  >();
+  private readonly taskCache = new Map<string, { mtimeMs: number; tasks: ReadonlyArray<TaskEntry> | null }>();
+
+  /**
+   * Bug E fix (preserved): concurrent `extractSubagentId` calls for the same
+   * session share ONE in-flight `readTaskEntries` instead of each kicking off
+   * its own. Cleared when the read settles.
+   */
+  private readonly taskInflight = new Map<string, Promise<ReadonlyArray<TaskEntry> | null>>();
 
   // ------------------------------------------------------------------------
   // generateHookConfig — extracted from src/hookConfigurator.ts buildEntry
@@ -235,32 +237,50 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   async extractSubagentId(rawPayload: unknown): Promise<string | null> {
     const meta = parsePayloadForSubagent(rawPayload);
     if (!meta) return null;
-    let cached = this.taskCache.get(meta.sessionId);
-    if (cached === undefined) {
-      // Bug E fix: pre-cache the in-flight Promise BEFORE awaiting so a
-      // second concurrent call for the same sessionId awaits the same
-      // read instead of starting a second `readTaskEntries`. Once
-      // resolved, the cache entry is replaced with the value.
-      const transcriptPath = this.resolveTranscriptPath(meta.sessionId, meta.cwd);
-      if (!transcriptPath) {
-        this.taskCache.set(meta.sessionId, null);
-        return null;
-      }
-      const loadPromise: Promise<ReadonlyArray<TaskEntry> | null> = readTaskEntries(transcriptPath)
-        .then((loaded) => {
-          const resolved = loaded.length > 0 ? loaded : null;
-          // Only overwrite if the cache entry is still the Promise — if a
-          // concurrent `clearSubagentCache` ran during the load, leave the
-          // cache clear so the next call re-reads.
-          if (this.taskCache.get(meta.sessionId) === loadPromise) {
-            this.taskCache.set(meta.sessionId, resolved);
-          }
-          return resolved;
-        });
-      this.taskCache.set(meta.sessionId, loadPromise);
-      cached = loadPromise;
+    const sid = meta.sessionId;
+
+    const transcriptPath = this.resolveTranscriptPath(sid, meta.cwd);
+    if (!transcriptPath) {
+      this.taskCache.set(sid, { mtimeMs: -1, tasks: null });
+      return null;
     }
-    const tasks = await cached;
+
+    // v0.6.1: detect transcript growth via mtime so a Task spawned after the
+    // first read is still attributed. One stat per call — cheap vs re-reading.
+    let mtimeMs: number;
+    try {
+      mtimeMs = (await fs.promises.stat(transcriptPath)).mtimeMs;
+    } catch {
+      // Transcript unreadable now (deleted / transient FS error). Serve the
+      // last cached attribution rather than dropping it; only null when cold.
+      const stale = this.taskCache.get(sid);
+      if (stale && stale.tasks) {
+        const e = findLatestTaskBefore(stale.tasks, meta.timestamp);
+        return e?.description ?? null;
+      }
+      return null;
+    }
+
+    const cached = this.taskCache.get(sid);
+    let tasks: ReadonlyArray<TaskEntry> | null;
+    if (cached && cached.mtimeMs === mtimeMs) {
+      tasks = cached.tasks; // up to date — no re-read
+    } else {
+      // Re-read (cold or transcript grew). Dedup concurrent reads via the
+      // in-flight map (Bug E). Only the resolved value updates the cache,
+      // and only if a concurrent clearSubagentCache didn't intervene.
+      let inflight = this.taskInflight.get(sid);
+      if (!inflight) {
+        inflight = readTaskEntries(transcriptPath).then((loaded) => (loaded.length > 0 ? loaded : null));
+        this.taskInflight.set(sid, inflight);
+        void inflight.finally(() => {
+          if (this.taskInflight.get(sid) === inflight) this.taskInflight.delete(sid);
+        });
+      }
+      tasks = await inflight;
+      this.taskCache.set(sid, { mtimeMs, tasks });
+    }
+
     if (!tasks) return null;
     const entry = findLatestTaskBefore(tasks, meta.timestamp);
     return entry?.description ?? null;
@@ -268,6 +288,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   clearSubagentCache(sessionId: string): void {
     this.taskCache.delete(sessionId);
+    this.taskInflight.delete(sessionId);
   }
 }
 

@@ -1,10 +1,12 @@
+import * as fs from 'node:fs';
+
 import type { Logger } from '../logger.js';
 import type {
   AbsPath, BuildErrorRef, BuildSignal, BuildStatus,
   FileReview, SessionId, SessionReview,
 } from '../types.js';
 import { intersectDiagnosticsWithHunks, type HunkCoordSnapshot } from './intersectHunks.js';
-import { resolveTsconfig } from './tsconfigResolver.js';
+import { resolveTsconfig, type ResolvedTsConfig } from './tsconfigResolver.js';
 import { runTsc } from './tscRunner.js';
 
 /**
@@ -66,6 +68,13 @@ export class BuildSignalManager {
   private opts: BuildSignalManagerOptions;
   private readonly runTscFn: typeof runTsc;
   private readonly resolveTsconfigFn: typeof resolveTsconfig;
+  /**
+   * v0.6.1: cache the resolved tsconfig per cwd, invalidated by the config
+   * file's mtime. The resolver does several `fs.access` + `readFile` + JSONC
+   * regex passes + an extends-chain walk; tsconfig rarely changes between
+   * Stops, so we re-resolve only when the file's mtime advances (one stat).
+   */
+  private readonly tsconfigCache = new Map<string, { configPath: string; mtimeMs: number; resolved: ResolvedTsConfig }>();
 
   constructor(
     private readonly deps: BuildSignalManagerDeps,
@@ -174,6 +183,35 @@ export class BuildSignalManager {
 
   // -- internals ----------------------------------------------------------
 
+  /**
+   * v0.6.1: mtime-cached tsconfig resolution. Returns the cached result when
+   * the config file is unchanged; otherwise re-resolves and re-caches. Never
+   * caches a null result (a tsconfig may appear later).
+   */
+  private async resolveTsconfigCached(cwd: string): Promise<ResolvedTsConfig | null> {
+    const cached = this.tsconfigCache.get(cwd);
+    if (cached) {
+      try {
+        const st = await fs.promises.stat(cached.configPath);
+        if (st.mtimeMs === cached.mtimeMs) return cached.resolved;
+      } catch {
+        // config moved/deleted — fall through to a fresh resolve.
+      }
+    }
+    const resolved = await this.resolveTsconfigFn(cwd, this.deps.logger);
+    if (resolved) {
+      try {
+        const st = await fs.promises.stat(resolved.configPath);
+        this.tsconfigCache.set(cwd, { configPath: resolved.configPath, mtimeMs: st.mtimeMs, resolved });
+      } catch {
+        // couldn't stat — skip caching, resolve fresh next time.
+      }
+    } else {
+      this.tsconfigCache.delete(cwd);
+    }
+    return resolved;
+  }
+
   private async runLoop(
     sid: SessionId,
     review: SessionReview,
@@ -181,7 +219,7 @@ export class BuildSignalManager {
     startedAt: number,
   ): Promise<void> {
     try {
-      const tsconfig = await this.resolveTsconfigFn(review.cwd, this.deps.logger);
+      const tsconfig = await this.resolveTsconfigCached(review.cwd);
 
       // Race-guard: if a newer run replaced this handle, drop.
       const handle = this.runs.get(sid);

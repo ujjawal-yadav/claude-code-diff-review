@@ -5,7 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: Se
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+A performance + reliability pass (the "derive-once / ship-deltas" wave) from a 6-module optimization review. No new features; the app does the same work with less recomputation, less IPC, and fewer file reads — plus two correctness fixes.
+
+### Fixed
+
+- **Chat no longer stalls on a large transcript.** `Ask Claude` read and Zod-validated the *entire* session transcript (100 MB+ for long sessions) before the first token — bounded heap but unbounded latency (the "stuck on Streaming…" symptom). The reader now tail-reads at most the last 8 MB (the relevant window lives near EOF), and chat enrichment is wrapped in a 1.5 s timeout that falls back to hunk-only context. Time-to-first-token is now constant regardless of transcript size.
+- **Sub-agent attribution no longer goes stale mid-session.** `extractSubagentId` cached the transcript's Task entries on first read and never refreshed (a sticky negative result meant a Task spawned later was permanently mis-attributed to the main agent). It now re-reads when the transcript's mtime advances (one cheap `stat` per call) and serves the last-known attribution if the transcript is transiently unreadable.
+- **Per-panel listener leak on panel close.** The review panel's `onDidReceiveMessage`/`onDidDispose` subscriptions were parked in the extension-lifetime subscription list and never released when a panel closed (2 retained closures per open/close cycle). They're now disposed in `onDispose`.
+
+### Changed
+
+- **Build-signal storm no longer re-renders the whole diff.** During a `tsc` run the host pushes 3–5 build-signal updates/sec; `DiffPane` was unmemoised and subscribed to the entire session, so it re-reconciled the focused file on every push while you were reading it. `DiffPane` is now memoised, the focused-file lookup is `useMemo`'d, and `HunkBlock` receives only `renameGroups` (reference-stable) instead of the whole session — so its own memo holds. The session-header flagged-count scan is memoised too.
+- **Chat streaming render is no longer quadratic.** The in-flight assistant message rendered through `react-markdown` on every delta (re-parsing the cumulative buffer → O(n²)); it now renders as plain pre-wrap text while streaming and formats once on completion.
+- **Status-bar pending summary stopped re-reading the event log.** Its cached fast path still streamed the whole session just to sum the total hunk count; `totalHunkCount` is now cached on the index entry alongside the pending count, so a cached refresh does zero segment I/O.
+- **Fewer index fsyncs per turn.** A hunk decision invalidated the pending count by rewriting the entire index file (9–15 fsyncs/turn); invalidation is now in-memory (the lazy recompute persists once on the next read).
+- **Smaller, deduped webview IPC.** Focusing an already-open panel no longer re-serializes the full session review when nothing changed; a burst of edits to one file collapses to a single `file-updated` per file per flush.
+- **Cheaper recomputation on the hot paths.** Per-turn blob writes are batched (`Promise.all`); the blob store skips a per-write `stat` probe (in-process dedup + rename-race fallback); `bytesSnapshotted` (immutable) is computed once and reused on every accept/reject instead of re-encoding the whole snapshot; the openReview prior-decision merge is an O(1) map lookup; risk flags are carried over for hunks unchanged since the prior turn; resolved tsconfig and chat credentials are cached (mtime / short-TTL).
+
+### Internal
+
+- Tests: new transcript tail-bound unit tests, a sub-agent mtime-re-read regression test, plus an adjusted `subagent` test (cached attribution now survives a transient transcript read failure). Full suite green (532 tests, run serially to avoid the known Windows fs-cleanup flake under parallel load).
 
 ## [0.6.0] — 2026-05-26
 

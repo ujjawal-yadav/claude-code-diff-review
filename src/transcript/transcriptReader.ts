@@ -79,6 +79,18 @@ const INPUT_SUMMARY_CAP_BYTES = 1024;       // per-tool-call input preview
 const USER_PROMPT_CAP_BYTES   = 4 * 1024;   // 4 KB
 const THINKING_CAP_BYTES      = 4 * 1024;   // 4 KB
 
+/**
+ * v0.6.1: hard cap on how many bytes we ever read from a transcript. Without
+ * it, a long-running session's transcript (100 MB+) was JSON.parse'd + Zod-
+ * validated line-by-line on every chat open — bounded heap (ring buffer) but
+ * UNBOUNDED latency, blocking the first chat token for seconds. The window we
+ * need (most-recent matching edit + neighbours) and the relevant Task entries
+ * live near EOF, so reading only the tail is correct in practice. A partial
+ * first line after a non-zero start offset is junk and is skipped by the
+ * tolerant per-line parse.
+ */
+const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024; // 8 MB
+
 const EMPTY_WINDOW: TranscriptWindow = Object.freeze({
   userPrompt: null,
   precedingToolCalls: [],
@@ -140,7 +152,7 @@ export async function readTranscriptWindow(
   const followingCollected: ToolCallSummary[] = [];
 
   try {
-    const stream = fs.createReadStream(transcriptPath, { encoding: 'utf8' });
+    const stream = await openBoundedReadStream(transcriptPath);
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
     for await (const line of rl) {
       if (!line) continue;
@@ -228,7 +240,7 @@ export async function readTaskEntries(
   const entries: TaskEntry[] = [];
 
   try {
-    const stream = fs.createReadStream(transcriptPath, { encoding: 'utf8' });
+    const stream = await openBoundedReadStream(transcriptPath);
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
     for await (const line of rl) {
       if (!line) continue;
@@ -282,6 +294,23 @@ export function findLatestTaskBefore(
 // --------------------------------------------------------------------------
 // Helpers (module-local)
 // --------------------------------------------------------------------------
+
+/**
+ * v0.6.1: open a read stream bounded to the last MAX_TRANSCRIPT_BYTES. If the
+ * file is smaller we read all of it; if larger we start at the tail offset.
+ * A stat failure (ENOENT/EACCES) falls through to a full-file stream whose
+ * open error surfaces to the caller's try/catch as before.
+ */
+async function openBoundedReadStream(transcriptPath: string): Promise<fs.ReadStream> {
+  let start = 0;
+  try {
+    const st = await fs.promises.stat(transcriptPath);
+    if (st.size > MAX_TRANSCRIPT_BYTES) start = st.size - MAX_TRANSCRIPT_BYTES;
+  } catch {
+    // stat failed — let createReadStream surface the error to the caller.
+  }
+  return fs.createReadStream(transcriptPath, { encoding: 'utf8', start });
+}
 
 function parseLine(line: string, logger?: Logger): TranscriptEntry | null {
   let raw: unknown;

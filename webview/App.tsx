@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useUi } from './store';
 import { send } from './vscode';
 import { SessionHeader } from './components/SessionHeader';
@@ -247,6 +247,20 @@ export function App(): JSX.Element {
     return () => window.removeEventListener('keydown', onKey);
   }, []); // empty deps — uses getState() so the listener never re-binds
 
+  // v0.6.1: memoise the focused-file lookup so DiffPane gets a stable `file`
+  // reference. `session.files` is carried by reference across setBuildSignal
+  // (which spreads `session` but not `files`), so during a tsc-run storm this
+  // returns the same object and DiffPane's memo holds; it only recomputes
+  // when the files array or selection actually changes.
+  const sessionFiles = session?.files;
+  const focused = useMemo(
+    () =>
+      sessionFiles && sessionFiles.length > 0
+        ? sessionFiles.find((f) => f.filePath === selectedFile) ?? sessionFiles[0]
+        : null,
+    [sessionFiles, selectedFile],
+  );
+
   if (!session) {
     return (
       <main className={styles.empty}>
@@ -263,7 +277,7 @@ export function App(): JSX.Element {
     );
   }
 
-  const focused = session.files.find((f) => f.filePath === selectedFile) ?? session.files[0];
+  const focusedFile = focused ?? session.files[0];
   const chatHunk = chat
     ? session.files.find((f) => f.filePath === chat.filePath)?.hunks[chat.hunkIndex]
     : null;
@@ -283,7 +297,7 @@ export function App(): JSX.Element {
         </aside>
         <Splitter />
         <section className={styles.content} aria-label="Diff for selected file">
-          <DiffPane file={focused} />
+          <DiffPane file={focusedFile} />
         </section>
       </div>
       {chat && chatHunk ? (

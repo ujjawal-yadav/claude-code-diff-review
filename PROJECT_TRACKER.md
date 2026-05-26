@@ -5,25 +5,21 @@
 
 ## 🎯 Where we left off (2026-05-26)
 
-**Last action:** Built **v0.6.0 — A9 Insights tab** (in the History panel) end-to-end. Implemented, tested (15 new tests green), both bundles build clean. **Uncommitted** — no version bump / tag / push yet.
+**Last action:** Built **v0.6.1 — optimization wave** ("derive-once / ship-deltas") from a 6-module review. All 6 waves implemented + tested. **Uncommitted** — no version bump / tag / push yet.
 
-**Two things sit uncommitted in the working tree:**
-- `webview/store.ts` — **v0.5.2** chat-error fix (`setChatError` clears `chatId` so the composer unlocks after a rate-limit/error; ships independently).
-- The v0.6 Insights feature (`src/insights/`, `src/types.ts`, `src/messages.ts`, `src/historyPanel.ts`, `webview/history/*`, tests, CHANGELOG `[Unreleased]`).
+**Shipped already:** v0.6.0 (Insights tab + v0.5.2 chat fix) is committed (`7313a07`) and tagged `v0.6.0`; commits are pushed.
 
-**v0.6 was reprioritised (decision #149, amends #62/#63):** A9 Insights leads; **A7.5 multi-language build-signal + the E2 experiment are SHELVED** until a real Python/Rust/Go user asks. Per decision #58 — optimize for the actual primary user, not hypothetical adoption.
+**v0.6.1 sits uncommitted in the working tree** (17 modified files + 1 new test). Highlights: chat transcript tail-bound (fixes the "stuck on Streaming…" hang) + timeout fallback; `DiffPane` memo + narrowed `HunkBlock`/`renameGroups` (kills the build-signal re-render storm); `ChatOverlay` streaming no longer O(n²); status-bar `totalHunkCount` cached (no re-stream); in-memory pending invalidation (fewer index fsyncs); bridge re-init gate + `file-updated` dedup + panel-listener leak fix; orchestrator byte-cache + O(1) prior-merge + flag carry-over; `extractSubagentId` mtime re-read (mid-session attribution bug) + tsconfig/credential caches.
 
 **Current state:**
-- v0.5.1 (`00daf15`) is pushed (no unpushed commits).
-- Insights tests 15/15 green; typecheck (host + webview) clean; `npm run build` produces both bundles.
-- Full-suite parallel run is **flaky** (pre-existing Windows fs-cleanup/clock races — different orchestrator/history integration files fail per run, all pass in isolation). Not a v0.6 regression.
+- typecheck (host + webview) clean; `npm run lint` 0 errors (31 pre-existing `any` warnings in a test file); `npm run build` produces both bundles.
+- **Full suite 532/532 green run serially** (`npx vitest run --no-file-parallelism`). Parallel run still hits the pre-existing Windows fs-cleanup flake — NOT a v0.6.1 regression. CHANGELOG entry written under `[Unreleased]`.
 
-**Next concrete step:** decide release shape (v0.5.2 chat fix + v0.6.0 Insights — separate tags or bundled), manual-E2E the Insights tab, then version-bump + tag + push. See plan file `~/.claude/plans/phase-alpha-immediate-md-new-cosmic-pearl.md` § "v0.6.0 Execution Plan".
+**Next concrete step:** manual E2E (chat on a huge-transcript session → no hang; scroll diff during a tsc run → no jank; rapid accept → status bar updates), then version-bump 0.6.0 → **0.6.1**, promote CHANGELOG `[Unreleased]` → `[0.6.1]`, commit, tag, push. See plan file § "v0.6.1 Optimization Wave".
 
 **Roadmap (locked):**
-- **v0.5.2** — chat-error composer-unlock fix (built, uncommitted).
-- **v0.6.0** — A9 Insights tab (built, uncommitted). A7.5 multi-language + E2 shelved on demand.
-- **v0.7 – v0.9** — Unallocated. Absorb deferred polish (#13 magic-number config, TooltipPopover everywhere, semantic A8) + patches.
+- **v0.6.1** — optimization wave (built, uncommitted).
+- **v0.7 – v0.9** — Unallocated. Absorb deferred polish (#13 magic-number config, build-signal single-pass counts, semantic A8) + patches. A7.5 multi-language build-signal + E2 shelved until a real non-TS user asks (decision #149).
 - **v1.0** — File-based token (Option C, validated by E1) + zero-config onboarding. Gated on Q-V1-1..6 smoke tests (1–2h spike).
 
 ---
@@ -32,7 +28,7 @@
 | Metric | Value |
 |---|---|
 | Last Updated | 2026-05-26 |
-| Current Version | **0.5.1** shipped; **v0.6.0 (Insights) + v0.5.2 (chat fix) built, uncommitted** |
+| Current Version | **0.6.0** shipped (`7313a07`, tagged); **v0.6.1 optimization wave built, uncommitted** |
 | Active Phase | **Decision-Support Pivot** (post-Phase β; v0.3 → v1.0 wave sequence) |
 | Latest Wave | v0.6.0 — A9 Insights tab in History panel (host-side aggregator over the event log) |
 | Tests Passing | **+15 new** insights tests green (full-suite parallel run flaky on pre-existing Windows fs races) |
@@ -1772,3 +1768,28 @@ Other resolved (defaults adopted from spec recommendation, no new Deviation need
 2. `npm run release:check` (note the flaky full-suite; re-run or run integration files serially to get a clean pass).
 3. Manual E2E: open History → Insights tab → 4 sections render; run a turn + accept/reject → live recompute after ~2 s.
 4. Version bump + CHANGELOG promote `[Unreleased]` → `[0.6.0]` + tag + push.
+
+---
+
+### Session (v0.6.1 — Optimization wave) — 2026-05-26 — derive-once / ship-deltas (BUILT, uncommitted)
+**Summary:** 6-agent module-by-module review (orchestration, build-signal, history+insights, server/chat, webview, bridge) surfaced ~12 optimization findings + 2 correctness bugs, all converging on one anti-pattern: recomputing/re-shipping derivable-or-stable data. 4 P0s verified against code before acting. Shipped as a **v0.6.1 patch** (perf + 2 bug fixes; no new feature).
+
+**Status:** All 6 waves implemented + tested. **Uncommitted** (17 modified files + 1 new test). No version bump / tag / push.
+
+**Completed:**
+- [x] **Wave 1 (hot-path latency):** transcript tail-read (8 MB cap, fixes chat hang) + 1.5 s timeout→hunk-only fallback (`transcriptReader.ts`, `chatService.ts`); `memo(DiffPane)` + `useMemo(focused)` + narrowed `HunkBlock` prop to `renameGroups` (kills build-signal re-render storm); `ChatOverlay` streaming as `<pre>`, markdown on finalise only (no O(n²)); `SessionHeader.flaggedCount` memoised.
+- [x] **Wave 2 (bridge):** `openOrFocus` re-init gated on session-ref change; `collapseFileUpdates` dedup per filePath in the flush batch; per-panel listeners disposed in `onDispose` (leak fix).
+- [x] **Wave 3 (history I/O):** in-memory pending invalidation (no per-hunk index fsync); `totalHunkCount` cached on the index entry → `computePendingAndTotal` fast path does zero segment I/O; `Promise.all` blob writes (turn-started/stopped/undo); `BlobStore.write` in-process `Set<sha>` dedup, dropped the pre-write `stat`.
+- [x] **Wave 4 (orchestrator):** `bytesSnapshotted` computed once + threaded into `recomputeMetrics`; O(1) prior-decision merge via a `priorByPath` Map; risk-flags carried over for `hunksAlignedShallow` hunks (skip `flagHunk` on continuation Stops).
+- [x] **Wave 5 (subsystem):** `extractSubagentId` mtime-based cache invalidation (fixes mid-session sub-agent mis-attribution) + serves cached on transient read failure; `resolveCredential` positive-result TTL cache (30 s); build-signal `ResolvedTsConfig` mtime cache. (5.4 single-pass counts skipped — minor.)
+- [x] **Wave 6 (tests):** new transcript tail-bound unit tests; `adapter.subagentMtime` regression test; adjusted `subagent.test` (cached attribution survives transient read failure). CHANGELOG `[Unreleased]` written.
+
+**Deliberately NOT done:** history index-write batching (excluded per scope; risk > reward, decision #37). coordSnapshot deferral skipped (would weaken the LH2 start-time-pinning guarantee for only a rare no-tsconfig allocation).
+
+**Tests:** **532/532 green run serially** (`npx vitest run --no-file-parallelism`). typecheck (host+webview) clean; lint 0 errors; both bundles build. Parallel run still flaky on the pre-existing Windows fs-cleanup race — not a regression.
+
+**Files Changed:** `src/{transcript/transcriptReader,chatService,reviewPanel,reviewOrchestrator,extension,adapters/claudeCodeAdapter}.ts`, `src/history/{historyService,historyTypes,historyBlobs}.ts`, `src/buildSignal/buildSignalManager.ts`, `webview/{App,components/DiffPane,components/HunkBlock,components/ChatOverlay,components/SessionHeader}.tsx`, `tests/unit/transcriptReader.test.ts`, new `tests/integration/adapter.subagentMtime.test.ts`, `CHANGELOG.md`. Plan appended to `~/.claude/plans/...cosmic-pearl.md` § "v0.6.1 Optimization Wave".
+
+**Next Session Should:**
+1. Manual E2E: chat on a huge-transcript session → first token < ~1.5 s (no hang); scroll the focused diff during a tsc run → no jank; rapid accept of 10 hunks → status bar updates without churn.
+2. Version bump 0.6.0 → **0.6.1**; promote CHANGELOG `[Unreleased]` → `[0.6.1]`; commit; tag `v0.6.1`; push (tag push triggers release.yml — run tests serially first; the CI gate may flake on the Windows race only locally, Linux CI should be clean).

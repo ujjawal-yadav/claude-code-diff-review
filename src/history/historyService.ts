@@ -288,13 +288,15 @@ export class HistoryService {
     if (!this.opts.enabled) return;
     try {
       const writer = this.getWriter(input.sessionId);
-      const files: TurnStartedEvent['files'] = [];
-      for (const f of input.files) {
-        const beforeBlob = f.beforeContent != null
-          ? await this.blobs.write(f.beforeContent)
-          : null;
-        files.push({ path: f.relPath, beforeBlob, mtimeBeforeMs: f.mtimeMs });
-      }
+      // v0.6.1: write the per-file before-blobs concurrently (the read side
+      // already batches via Promise.all). N sequential awaits → 1 await depth.
+      const files: TurnStartedEvent['files'] = await Promise.all(
+        input.files.map(async (f) => ({
+          path: f.relPath,
+          beforeBlob: f.beforeContent != null ? await this.blobs.write(f.beforeContent) : null,
+          mtimeBeforeMs: f.mtimeMs,
+        })),
+      );
       const ev: Omit<TurnStartedEvent, 'eventId' | 'v'> = {
         kind: 'turn-started',
         ts: Date.now(),
@@ -315,21 +317,18 @@ export class HistoryService {
     if (!this.opts.enabled) return;
     try {
       const writer = this.getWriter(input.sessionId);
-      const files: TurnStoppedEvent['files'] = [];
-      for (const f of input.files) {
-        const afterBlob = f.afterContent != null
-          ? await this.blobs.write(f.afterContent)
-          : null;
-        files.push({
+      // v0.6.1: concurrent after-blob writes (was sequential per file).
+      const files: TurnStoppedEvent['files'] = await Promise.all(
+        input.files.map(async (f) => ({
           path: f.relPath,
-          afterBlob,
+          afterBlob: f.afterContent != null ? await this.blobs.write(f.afterContent) : null,
           isNew: f.isNew,
           isDeleted: f.isDeleted,
           isBinary: f.isBinary,
           ...(f.subagentId ? { subagentId: f.subagentId } : {}),
           hunks: f.hunks,
-        });
-      }
+        })),
+      );
       const lastMsg = truncateMessage(input.lastAssistantMessage);
       const ev: Omit<TurnStoppedEvent, 'eventId' | 'v'> = {
         kind: 'turn-stopped',
@@ -468,10 +467,13 @@ export class HistoryService {
     if (!this.opts.enabled) return;
     try {
       const writer = this.getWriter(input.sessionId);
+      // v0.6.1: concurrent blob writes for the undo's per-path post-content.
       const postBlobs: Record<string, string> = {};
-      for (const [relPath, content] of Object.entries(input.postContents)) {
-        postBlobs[relPath] = await this.blobs.write(content);
-      }
+      await Promise.all(
+        Object.entries(input.postContents).map(async ([relPath, content]) => {
+          postBlobs[relPath] = await this.blobs.write(content);
+        }),
+      );
       const target: UndoEvent['target'] = {
         srcTurnId: input.target.srcTurnId,
         srcEventId: input.target.srcEventId,
@@ -1139,6 +1141,10 @@ export class HistoryService {
     // (every hunk Claude produced this turn is now pending review).
     entry.hasOpenTurn = false;
     entry.pendingHunkCount = null;
+    // v0.6.1: a new turn-stopped changes the cumulative produced-hunk total,
+    // so invalidate the cached total too — it is recomputed alongside pending
+    // on the next status-bar read.
+    entry.totalHunkCount = null;
     this.liveSessions.set(sessionId, entry);
     await this.index.upsertSession(entry);
   }
@@ -1221,13 +1227,17 @@ export class HistoryService {
    * Called from `recordHunkDecided` and `recordUndo` write paths so the
    * next `getPendingReviewsSummary` recomputes from the segments.
    */
-  private async invalidatePendingHunkCount(sessionId: string): Promise<void> {
+  private invalidatePendingHunkCount(sessionId: string): void {
     const entry = this.liveSessions.get(sessionId);
     if (entry && entry.pendingHunkCount !== null) {
+      // v0.6.1: null in memory only — NO disk write. This was firing a full
+      // index serialize+fsync on every hunk decision (9-15 per turn). The
+      // live entry is the SAME object the index cache holds (upserted by
+      // ref on turn start/stop), so `index.read()` already sees the null and
+      // recomputes lazily; `computePendingAndTotal`'s slow path then persists
+      // the fresh counts once on the next read. Worst case after a crash is a
+      // slightly-stale status-bar number that self-heals on the next refresh.
       entry.pendingHunkCount = null;
-      this.liveSessions.set(sessionId, entry);
-      // Persist only if it changed something callers will read soon.
-      await this.index.upsertSession(entry);
     }
     // β.0 (10.1.5b): the per-session change always invalidates the aggregate.
     this.pendingSummaryCache = null;
@@ -1311,17 +1321,15 @@ export class HistoryService {
   private async computePendingAndTotal(
     entry: SessionIndexEntry,
   ): Promise<{ pending: number; total: number }> {
-    // Fast path: cached pending count + a single scan for total only.
-    if (entry.pendingHunkCount != null) {
-      let total = 0;
-      for await (const ev of this.reader.readSession(entry.sessionId)) {
-        if (ev.kind === 'turn-stopped') {
-          for (const f of ev.files) total += f.hunks.length;
-        }
-      }
-      return { pending: entry.pendingHunkCount, total };
+    // v0.6.1 fast path: BOTH counts cached on the entry → zero segment I/O.
+    // Previously this branch still streamed the entire session just to sum
+    // `total`, making each (1s-debounced) status-bar refresh O(sessions ×
+    // events) on disk. Now `total` is cached alongside `pending`.
+    if (entry.pendingHunkCount != null && entry.totalHunkCount != null) {
+      return { pending: entry.pendingHunkCount, total: entry.totalHunkCount };
     }
-    // Slow path: replay once, compute both.
+    // Slow path: one replay computes both, then write through so subsequent
+    // refreshes hit the fast path until the next state change invalidates.
     type HunkKey = string;
     const pendingSet = new Set<HunkKey>();
     let total = 0;
@@ -1351,7 +1359,15 @@ export class HistoryService {
           break;
       }
     }
-    return { pending: pendingSet.size, total };
+    const pending = pendingSet.size;
+    // Write-through: `entry` is the index-cache object (listSessions returns
+    // the cache entries by reference), so mutating it updates in-memory reads;
+    // persist once so the counts survive a restart. One write per state change,
+    // not per refresh.
+    entry.pendingHunkCount = pending;
+    entry.totalHunkCount = total;
+    await this.index.upsertSession(entry).catch(() => undefined);
+    return { pending, total };
   }
 }
 

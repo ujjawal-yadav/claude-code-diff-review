@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { FileReview } from '../../src/types';
 import { useUi } from '../store';
 import { send } from '../vscode';
@@ -12,15 +13,17 @@ interface Props {
   file: FileReview;
 }
 
-export function DiffPane({ file }: Props): JSX.Element {
+function DiffPaneImpl({ file }: Props): JSX.Element {
   const viewType = useUi((s) => s.viewType);
   const expanded = useUi((s) => !!s.expanded[file.filePath] || s.session?.files.length === 1);
   const toggle   = useUi((s) => s.toggleExpanded);
   const selectedHunk = useUi((s) => s.selectedHunk);
   const selectHunk   = useUi((s) => s.selectHunk);
-  // v0.4 (A8 cheap): thread session down so HunkBlock can resolve the
-  // rename-group panel's member list. Optional in the HunkBlock API.
-  const session  = useUi((s) => s.session);
+  // v0.4 (A8 cheap): thread rename-group member lists down so HunkBlock can
+  // resolve the rename-group panel. v0.6.1: subscribe to ONLY `renameGroups`
+  // (reference-stable across decision/build-signal mutations) instead of the
+  // whole `session` — the latter re-rendered DiffPane on every setBuildSignal.
+  const renameGroups = useUi((s) => s.session?.renameGroups);
 
   if (file.isBinary) {
     return (
@@ -90,7 +93,7 @@ export function DiffPane({ file }: Props): JSX.Element {
               selected={selectedHunk === h.index}
               onSelect={selectHunk}
               {...(file.subagentId ? { subagentId: file.subagentId } : {})}
-              {...(session ? { session } : {})}
+              {...(renameGroups ? { renameGroups } : {})}
             />
           ))}
         </div>
@@ -98,6 +101,15 @@ export function DiffPane({ file }: Props): JSX.Element {
     </article>
   );
 }
+
+/**
+ * v0.6.1: memoised so the high-frequency `setBuildSignal` stream (3-5×/sec
+ * during a tsc run) — which mints a new `session` object each push — no
+ * longer re-reconciles the entire focused diff while the user is reading it.
+ * `file` is the only prop; `App` passes a `useMemo`'d reference so it's stable
+ * unless the focused file actually changed.
+ */
+export const DiffPane = memo(DiffPaneImpl);
 
 function FileHeader({ file, expanded, onToggle }: { file: FileReview; expanded: boolean; onToggle(): void }): JSX.Element {
   return (

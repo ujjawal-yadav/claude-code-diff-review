@@ -19,7 +19,7 @@ import { AuthFailureBurstDetector } from './authFailureBurstDetector.js';
 import { ClaudeReviewScmProvider } from './scmProvider.js';
 import { AnthropicClient } from './anthropicClient.js';
 import { ChatService } from './chatService.js';
-import { resolveCredential } from './credentialResolver.js';
+import { resolveCredential, type ResolvedCredential } from './credentialResolver.js';
 import { showOnboardingIfNeeded } from './onboarding.js';
 import { HunkCodeLensProvider, ACCEPT_HUNK_AT, REJECT_HUNK_AT } from './codeLensProvider.js';
 import { createTelemetry } from './telemetry.js';
@@ -219,11 +219,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // the route-level discriminator selects which entry to use.
   const claudeAdapter = agentAdapters.get('claude-code')!;
 
-  const anthropicClient = new AnthropicClient({
-    resolveCredential: () => resolveCredential(
+  // v0.6.1: positive-result TTL cache over credential resolution. Each
+  // `streamChat` calls this; without the cache a chat-heavy session re-reads
+  // `~/.claude/.credentials.json` + tree-walks it on every message. We cache
+  // ONLY a successful credential (tokens rotate rarely) for a short window —
+  // a `null` (no key) is never cached, so a user who sets a key mid-session is
+  // picked up immediately rather than waiting out the TTL.
+  const CREDENTIAL_TTL_MS = 30_000;
+  let credentialCache: { value: ResolvedCredential; expiresAt: number } | null = null;
+  const resolveCredentialCached = async (): Promise<ResolvedCredential | null> => {
+    const now = Date.now();
+    if (credentialCache && credentialCache.expiresAt > now) return credentialCache.value;
+    const value = await resolveCredential(
       { getOAuthToken: () => secrets.getOAuthToken(), getApiKey: () => secrets.getApiKey() },
       (kind, msg) => logger?.warn('credentials', kind, { msg }),
-    ),
+    );
+    credentialCache = value ? { value, expiresAt: now + CREDENTIAL_TTL_MS } : null;
+    return value;
+  };
+  const anthropicClient = new AnthropicClient({
+    resolveCredential: resolveCredentialCached,
     model:     config.get<string>('chatModel')      ?? 'claude-haiku-4-5-20251001',
     maxTokens: config.get<number>('chatMaxTokens')  ?? 2048,
   });

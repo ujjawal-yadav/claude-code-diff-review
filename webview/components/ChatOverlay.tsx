@@ -114,7 +114,15 @@ export function ChatOverlay({ filePath, hunk, onClose }: Props): JSX.Element {
           <div className={styles.assistantTurn}>
             <span className={styles.role}>Claude</span>
             <div className={styles.content}>
-              <ReactMarkdown rehypePlugins={[rehypeSanitize]}>{chat.streaming || '…'}</ReactMarkdown>
+              {/* v0.6.1: render the in-flight stream as plain pre-wrap text.
+                  ReactMarkdown re-parses its whole input on every render, so
+                  parsing the cumulative buffer on each delta was O(n²) over a
+                  long answer. The finalised turn (above, in `chat.turns`) is
+                  still rendered through ReactMarkdown — the formatting "lands"
+                  the instant streaming completes. */}
+              <div className={styles.streamingText} style={{ whiteSpace: 'pre-wrap' }}>
+                {chat.streaming || '…'}
+              </div>
             </div>
           </div>
         ) : null}
