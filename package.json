@@ -1,8 +1,8 @@
 {
   "name": "claude-code-diff-review",
   "displayName": "Claude Code Diff Review",
-  "description": "Per-hunk review of Claude Code session changes with in-context AI chat. Pro/Max OAuth and API-key auth supported.",
-  "version": "0.6.1",
+  "description": "Review every Claude Code change per-hunk: accept, reject, edit, or ask — with risk flags, a typecheck signal, history/resume, and in-context AI chat. Snapshot-backed, no git required.",
+  "version": "0.6.2",
   "publisher": "UjjawalYadav",
   "license": "MIT",
   "engines": {

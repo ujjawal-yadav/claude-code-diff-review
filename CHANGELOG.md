@@ -7,6 +7,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: Se
 
 _No unreleased changes yet._
 
+## [0.6.2] — 2026-05-26
+
+### Changed
+
+- **Documentation refresh.** The README now describes the product as it stands today — a unified "What it does" walkthrough (four-verb per-hunk review, risk flags + TypeScript build signal, reject-with-feedback, refactor grouping, history/Resume/Insights, transcript-aware chat, sub-agent attribution) plus a keyboard-shortcuts reference and an accurate config/command list — instead of a running list of per-version "New in…" sections. Per-version history now lives solely in this changelog. Marketplace short description updated to match.
+
 ## [0.6.1] — 2026-05-26
 
 A performance + reliability pass (the "derive-once / ship-deltas" wave) from a 6-module optimization review. No new features; the app does the same work with less recomputation, less IPC, and fewer file reads — plus two correctness fixes.
